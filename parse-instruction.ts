@@ -203,7 +203,7 @@ type NumericInstruction
 			'f32.reinterpret' |
 			'f64.reinterpret'
 		}
-type Instruction
+export type Instruction
 	= ControlInstruction
 	| ParametricInstruction
 	| VariableInstruction
@@ -218,7 +218,7 @@ export const parseInstruction = parseAndThen(
 		return parser
 	}
 )
-const parseBody: Parser<Instruction[]> = parseChoice([
+export const parseBody: Parser<Instruction[]> = parseChoice([
 	parseMap(parseExact(0x0B), _ => []),
 	parseAndThen(
 		parseInstruction,

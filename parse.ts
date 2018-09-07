@@ -14,6 +14,8 @@ export const parseAndThen = <A, B>(parser: Parser<A>, f: (a: A) => Parser<B>): P
 	}
 export const parseMap = <A, B>(parser: Parser<A>, f: (a: A) => B) =>
 	parseAndThen(parser, a => parseReturn(f(a)))
+export const parseIgnore = <A>(parser1: Parser<any>, parser2: Parser<A>) =>
+	parseAndThen(parser1, _ => parser2)
 export const parseExact = (byte: number): Parser<void> => parseMap(
 	parseByte,
 	readByte => {
@@ -59,5 +61,5 @@ export const parseVector = <A>(parser: Parser<A>) => parseAndThen(
 	parseTimes(parser)
 )
 
-export const slice = (data: DataView, offset: number) =>
-	new DataView(data.buffer, data.byteOffset + offset)
+export const slice = (data: DataView, offset: number, length?: number) =>
+	new DataView(data.buffer, data.byteOffset + offset, length)
