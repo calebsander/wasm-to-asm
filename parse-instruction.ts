@@ -1,6 +1,7 @@
 import {
 	Parser,
 	parseAndThen,
+	parseByOpcode,
 	parseByte,
 	parseChoice,
 	parseExact,
@@ -210,14 +211,8 @@ export type Instruction
 	| MemoryInstruction
 	| NumericInstruction
 
-export const parseInstruction = parseAndThen(
-	parseByte,
-	opcode => {
-		const parser = instructionParsers.get(opcode)
-		if (!parser) throw new Error(`Unexpected opcode 0x${opcode.toString(16)}`)
-		return parser
-	}
-)
+const instructionParsers = new Map<number, Parser<Instruction>>()
+export const parseInstruction = parseByOpcode(instructionParsers)
 export const parseBody: Parser<Instruction[]> = parseChoice([
 	parseMap(parseExact(0x0B), _ => []),
 	parseAndThen(
@@ -233,17 +228,13 @@ interface IfBody {
 	elseInstructions: Instruction[]
 }
 const parseIfBody: Parser<IfBody> = parseChoice([
-	parseMap(
-		parseExact(0x0B),
-		_ => ({ifInstructions: [], elseInstructions: []})
-	),
-	parseAndThen(
-		parseExact(0x05),
-		_ => parseMap(
+	parseByOpcode(new Map<number, Parser<IfBody>>([
+		[0x0B, parseReturn({ifInstructions: [], elseInstructions: []})],
+		[0x05, parseMap(
 			parseBody,
 			elseInstructions => ({ifInstructions: [], elseInstructions})
-		)
-	),
+		)]
+	])),
 	parseAndThen(
 		parseInstruction,
 		instruction => parseMap(
@@ -296,7 +287,7 @@ const parseMemoryInstruction = <TYPE extends string>(type: TYPE) =>
 const MEMORY_SIZE: Instruction = {type: 'memory.size'}
 const MEMORY_GROW: Instruction = {type: 'memory.grow'}
 
-const instructionParsers = new Map<number, Parser<Instruction>>([
+for (const [opcode, parser] of [
 	[0x00, parseFixedInstruction('unreachable')],
 	[0x01, parseFixedInstruction('nop')],
 	[0x02, parseBlockLike('block')],
@@ -521,4 +512,4 @@ const instructionParsers = new Map<number, Parser<Instruction>>([
 	[0xBD, parseFixedInstruction('i64.reinterpret')],
 	[0xBE, parseFixedInstruction('f32.reinterpret')],
 	[0xBF, parseFixedInstruction('f64.reinterpret')]
-])
+] as [number, Parser<Instruction>][]) instructionParsers.set(opcode, parser)

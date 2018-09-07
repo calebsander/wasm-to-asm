@@ -46,6 +46,14 @@ const parseTimes = <A>(parser: Parser<A>) => (times: number): Parser<A[]> =>
 export const parseByte: Parser<number> =
 	data => ({value: data.getUint8(0), length: 1})
 
+export const parseByOpcode = <A>(parsers: Map<number, Parser<A>>) => parseAndThen(
+	parseByte,
+	opcode => {
+		const parser = parsers.get(opcode)
+		if (!parser) throw new Error(`Unexpected opcode ${opcode}`)
+		return parser
+	}
+)
 export const parseUnsigned: Parser<number> = parseAndThen(
 	parseByte,
 	n =>
@@ -61,5 +69,5 @@ export const parseVector = <A>(parser: Parser<A>) => parseAndThen(
 	parseTimes(parser)
 )
 
-export const slice = (data: DataView, offset: number, length?: number) =>
+const slice = (data: DataView, offset: number, length = data.byteLength - offset) =>
 	new DataView(data.buffer, data.byteOffset + offset, length)

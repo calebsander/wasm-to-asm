@@ -10,7 +10,7 @@ import {
 	parseReturn,
 	parseUnsigned,
 	parseVector,
-	slice
+	parseByOpcode
 } from './parse'
 import {Instruction, parseBody} from './parse-instruction'
 import {ValueType, parseValueType} from './parse-value-type'
@@ -165,36 +165,24 @@ const parseGlobalType = parseAndThen(
 		mutable => ({type, mutable: !!mutable})
 	)
 )
-const parseImportDescription = parseChoice([
-	parseIgnore(
-		parseExact(0x00),
-		parseMap(
-			parseUnsigned,
-			(index): ImportDescription => ({type: 'function', index})
-		)
-	),
-	parseIgnore(
-		parseExact(0x01),
-		parseMap(
-			parseTableType,
-			(limits): ImportDescription => ({type: 'table', limits})
-		)
-	),
-	parseIgnore(
-		parseExact(0x02),
-		parseMap(
-			parseLimits,
-			(limits): ImportDescription => ({type: 'memory', limits})
-		)
-	),
-	parseIgnore(
-		parseExact(0x03),
-		parseMap(
-			parseGlobalType,
-			(valueType): ImportDescription => ({type: 'global', valueType})
-		)
-	)
-])
+const parseImportDescription = parseByOpcode(new Map([
+	[0x00, parseMap(
+		parseUnsigned,
+		(index): ImportDescription => ({type: 'function', index})
+	)],
+	[0x01, parseMap(
+		parseTableType,
+		(limits): ImportDescription => ({type: 'table', limits})
+	)],
+	[0x02, parseMap(
+		parseLimits,
+		(limits): ImportDescription => ({type: 'memory', limits})
+	)],
+	[0x03, parseMap(
+		parseGlobalType,
+		(valueType): ImportDescription => ({type: 'global', valueType})
+	)]
+]))
 const parseImport = parseAndThen(
 	parseName,
 	module => parseAndThen(
@@ -205,36 +193,24 @@ const parseImport = parseAndThen(
 		)
 	)
 )
-const parseExportDescription = parseChoice([
-	parseIgnore(
-		parseExact(0x00),
-		parseMap(
-			parseUnsigned,
-			(index): ExportDescription => ({type: 'function', index})
-		)
-	),
-	parseIgnore(
-		parseExact(0x01),
-		parseMap(
-			parseUnsigned,
-			(index): ExportDescription => ({type: 'table', index})
-		)
-	),
-	parseIgnore(
-		parseExact(0x02),
-		parseMap(
-			parseUnsigned,
-			(index): ExportDescription => ({type: 'memory', index})
-		)
-	),
-	parseIgnore(
-		parseExact(0x03),
-		parseMap(
-			parseUnsigned,
-			(index): ExportDescription => ({type: 'global', index})
-		)
-	)
-])
+const parseExportDescription = parseByOpcode(new Map([
+	[0x00, parseMap(
+		parseUnsigned,
+		(index): ExportDescription => ({type: 'function', index})
+	)],
+	[0x01, parseMap(
+		parseUnsigned,
+		(index): ExportDescription => ({type: 'table', index})
+	)],
+	[0x02, parseMap(
+		parseUnsigned,
+		(index): ExportDescription => ({type: 'memory', index})
+	)],
+	[0x03, parseMap(
+		parseUnsigned,
+		(index): ExportDescription => ({type: 'global', index})
+	)]
+]))
 const parseExport = parseAndThen(
 	parseName,
 	name => parseMap(
@@ -286,18 +262,22 @@ const parseMemoryInitializer = parseAndThen(
 	)
 )
 
-const sectionParsers = new Map<number, Parser<Section>>([
-	[0, parseAndThen(
-		parseName,
-		name => ({buffer, byteOffset, byteLength}): ParseResult<Section> => ({
-			value: {
-				type: 'custom',
-				name,
-				contents: buffer.slice(byteOffset, byteOffset + byteLength)
-			},
-			length: byteLength
-		})
-	)],
+const sectionParsers = new Map<number, Parser<Section>>()
+	.set(0, parseAndThen(
+		parseUnsigned,
+		length => parseAndThen(
+			parseName,
+			name => ({buffer, byteOffset}): ParseResult<Section> => ({
+				value: {
+					type: 'custom',
+					name,
+					contents: buffer.slice(byteOffset, byteOffset + length)
+				},
+				length
+			})
+		)
+	));
+for (const [id, parser] of [
 	[1, parseMap(
 		parseVector(parseFuncType),
 		(types): Section => ({type: 'type', types})
@@ -350,18 +330,13 @@ const sectionParsers = new Map<number, Parser<Section>>([
 		parseVector(parseMemoryInitializer),
 		(initializers): Section => ({type: 'data', initializers})
 	)]
-])
-const parseSection = parseAndThen(
-	parseByte,
-	id => {
-		const parser = sectionParsers.get(id)
-		if (!parser) throw new Error(`Unexpected section ID ${id}`)
-		return parseAndThen(
-			parseUnsigned,
-			size => data => parser(slice(data, 0, size))
-		)
-	}
-)
+] as [number, Parser<Section>][]) {
+	sectionParsers.set(id, parseIgnore(
+		parseUnsigned,
+		parser
+	))
+}
+const parseSection = parseByOpcode(sectionParsers)
 const parseMagic: Parser<void> = data => {
 	if (data.getUint32(0) !== 0x0061736D) {
 		throw new Error('Invalid magic bytes');
