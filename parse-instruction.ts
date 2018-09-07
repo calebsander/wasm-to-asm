@@ -6,14 +6,11 @@ import {
 	parseExact,
 	parseMap,
 	parseReturn,
-	parseTimes
+	parseVector,
+	parseUnsigned
 } from './parse'
+import {ValueType, parseValueType} from './parse-value-type'
 
-type ValueType
-	= 'i32'
-	| 'i64'
-	| 'f32'
-	| 'f64'
 type ResultType = 'empty' | ValueType
 type Label = number
 type FunctionIndex = number
@@ -258,12 +255,6 @@ const parseIfBody: Parser<IfBody> = parseChoice([
 		)
 	)
 ])
-const parseValueType = parseChoice([
-	parseMap(parseExact(0x7F), (_): ValueType => 'i32'),
-	parseMap(parseExact(0x7E), (_): ValueType => 'i64'),
-	parseMap(parseExact(0x7D), (_): ValueType => 'f32'),
-	parseMap(parseExact(0x7C), (_): ValueType => 'f64')
-])
 const parseResultType = parseChoice([
 	parseMap(parseExact(0x40), (_): ResultType => 'empty'),
 	parseValueType
@@ -278,16 +269,6 @@ const parseBlockLike = (type: 'block' | 'loop') =>
 	)
 const parseFixedInstruction = <TYPE extends string>(type: TYPE) =>
 	parseReturn({type})
-const parseUnsigned: Parser<number> = parseAndThen(
-	parseByte,
-	n =>
-		n & 0b10000000
-			? parseMap(
-					parseUnsigned,
-					m => (m << 7 | (n & 0b01111111)) >>> 0
-				)
-			: parseReturn(n)
-)
 const parseSigned: Parser<bigint> = parseAndThen(
 	parseByte,
 	n =>
@@ -297,10 +278,6 @@ const parseSigned: Parser<bigint> = parseAndThen(
 					m => m << 7n | BigInt(n & 0b01111111)
 				)
 			: parseReturn(BigInt(n << 25 >> 25)) // sign-extend bit 6
-)
-const parseVector = <A>(parser: Parser<A>) => parseAndThen(
-	parseUnsigned,
-	parseTimes(parser)
 )
 const parseLocalInstruction = <TYPE extends string>(type: TYPE) =>
 	parseMap(parseUnsigned, local => ({type, local}))

@@ -12,14 +12,16 @@ export const parseAndThen = <A, B>(parser: Parser<A>, f: (a: A) => Parser<B>): P
 		const {value, length: length2} = f(a)(slice(data, length))
 		return {value, length: length + length2}
 	}
-export const parseExact = (byte: number): Parser<void> => {
-	return data => {
-		if (!data.byteLength || data.getUint8(0) !== byte) {
+export const parseMap = <A, B>(parser: Parser<A>, f: (a: A) => B) =>
+	parseAndThen(parser, a => parseReturn(f(a)))
+export const parseExact = (byte: number): Parser<void> => parseMap(
+	parseByte,
+	readByte => {
+		if (readByte !== byte) {
 			throw new Error('Mismatched bytes')
 		}
-		return {value: undefined, length: 1}
 	}
-}
+)
 export const parseChoice = <A>(parsers: Parser<A>[]): Parser<A> =>
 	data => {
 		for (const parser of parsers) {
@@ -28,9 +30,7 @@ export const parseChoice = <A>(parsers: Parser<A>[]): Parser<A> =>
 		}
 		throw new Error('No parser succeeded')
 	}
-export const parseMap = <A, B>(parser: Parser<A>, f: (a: A) => B) =>
-	parseAndThen(parser, a => parseReturn(f(a)))
-export const parseTimes = <A>(parser: Parser<A>) => (times: number): Parser<A[]> =>
+const parseTimes = <A>(parser: Parser<A>) => (times: number): Parser<A[]> =>
 	times
 		? parseAndThen(
 				parser,
@@ -43,6 +43,21 @@ export const parseTimes = <A>(parser: Parser<A>) => (times: number): Parser<A[]>
 
 export const parseByte: Parser<number> =
 	data => ({value: data.getUint8(0), length: 1})
+
+export const parseUnsigned: Parser<number> = parseAndThen(
+	parseByte,
+	n =>
+		n & 0b10000000
+			? parseMap(
+					parseUnsigned,
+					m => (m << 7 | (n & 0b01111111)) >>> 0
+				)
+			: parseReturn(n)
+)
+export const parseVector = <A>(parser: Parser<A>) => parseAndThen(
+	parseUnsigned,
+	parseTimes(parser)
+)
 
 export const slice = (data: DataView, offset: number) =>
 	new DataView(data.buffer, data.byteOffset + offset)
