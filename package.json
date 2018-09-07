@@ -1,0 +1,16 @@
+{
+	"name": "wasm-to-asm",
+	"version": "1.0.0",
+	"description": "Combile WASM to x86_64",
+	"main": "index.js",
+	"scripts": {
+		"build": "tsc",
+		"test": "echo \"Error: no test specified\" && exit 1"
+	},
+	"author": "Caleb Sander",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^10.9.4",
+		"typescript": "calebsander/TypeScript#feature/bigint-lkg"
+	}
+}
