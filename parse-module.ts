@@ -17,8 +17,8 @@ import {ValueType, parseValueType} from './parse-value-type'
 
 const VERSION = 1
 
-interface FunctionType {
-	parameters: ValueType[]
+export interface FunctionType {
+	params: ValueType[]
 	results: ValueType[]
 }
 interface Limits {
@@ -105,7 +105,7 @@ interface ElementSection {
 	type: 'element'
 	initializers: TableInitializer[]
 }
-interface CodeSection {
+export interface CodeSection {
 	type: 'code'
 	segments: CodeSegment[]
 }
@@ -141,9 +141,9 @@ const parseFuncType = parseIgnore(
 	parseExact(0x60),
 	parseAndThen(
 		parseValueTypes,
-		parameters => parseMap(
+		params => parseMap(
 			parseValueTypes,
-			results => ({parameters, results})
+			results => ({params, results})
 		)
 	)
 )
