@@ -66,132 +66,104 @@ export interface AssemblyInstruction {
 	readonly str: string
 }
 
+abstract class SrcDestInstruction {
+	constructor(readonly src: Datum, readonly dest: Datum) {}
+	abstract readonly op: string
+	get str() {
+		return `${this.op} ${datumToString(this.src)}, ${datumToString(this.dest)}`
+	}
+}
 abstract class FullRegisterInstruction {
 	constructor(readonly register: Register) {}
 	get registerStr() {
 		return datumToString({type: 'register', register: this.register})
 	}
 }
-export class Label implements AssemblyInstruction {
+export class Label {
 	constructor(readonly label: string) {}
 	get str() { return this.label + ':' }
 }
-export class AddInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `add ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class Comment {
+	constructor(readonly comment: string) {}
+	get str() { return '; ' + this.comment }
 }
-export class AndInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `and ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class AddInstruction extends SrcDestInstruction {
+	get op() { return 'add' }
 }
-export class CallInstruction implements AssemblyInstruction {
+export class AndInstruction extends SrcDestInstruction {
+	get op() { return 'and' }
+}
+export class CallInstruction {
 	constructor(readonly target: Datum) {}
 	get str() { return `call ${datumToString(this.target)}` }
 }
-export class CMoveInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum, readonly cond: JumpCond) {}
-	get str() {
-		return `cmov${this.cond} ${datumToString(this.src)}, ${datumToString(this.dest)}`
+export class CMoveInstruction extends SrcDestInstruction {
+	constructor(src: Datum, dest: Datum, readonly cond: JumpCond) {
+		super(src, dest)
 	}
+	get op() { return 'cmov' + this.cond }
 }
-export class CmpInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `cmp ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class CmpInstruction extends SrcDestInstruction {
+	get op() { return 'cmp' }
 }
-export class DecInstruction implements AssemblyInstruction {
-	constructor(readonly target: Datum) {}
-	get str() { return `dec ${datumToString(this.target)}` }
-}
-export class IncInstruction implements AssemblyInstruction {
-	constructor(readonly target: Datum) {}
-	get str() { return `inc ${datumToString(this.target)}` }
-}
-export class JumpInstruction implements AssemblyInstruction {
+export class JumpInstruction {
 	constructor(readonly target: Datum, readonly cond?: JumpCond) {}
 	get str() { return `j${this.cond || 'mp'} ${datumToString(this.target)}` }
 }
-export class MoveInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `mov ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class MoveInstruction extends SrcDestInstruction {
+	get op() { return 'mov' }
 }
-export class MoveExtendInstruction implements AssemblyInstruction {
+export class MoveExtendInstruction extends SrcDestInstruction {
 	constructor(
-		readonly src: Datum,
-		readonly dest: Datum,
+		src: Datum,
+		dest: Datum,
 		readonly srcWidth: Width,
 		readonly destWidth: Width,
 		readonly signed: boolean
-	) {}
-	get str() {
-		return `mov${this.signed ? 's' : 'z'}${this.srcWidth}${this.destWidth} ` +
-			`${datumToString(this.src)}, ${datumToString(this.dest)}`
+	) {
+		super(src, dest)
+	}
+	get op() {
+		return `mov${this.signed ? 's' : 'z'}${this.srcWidth}${this.destWidth}`
 	}
 }
-export class OrInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `or ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class OrInstruction extends SrcDestInstruction {
+	get op() { return 'or' }
 }
-export class PopInstruction extends FullRegisterInstruction implements AssemblyInstruction {
+export class PopInstruction extends FullRegisterInstruction {
 	get str() { return `pop ${this.registerStr}` }
 }
-export class PushInstruction extends FullRegisterInstruction implements AssemblyInstruction {
+// TODO: allow pushing a Datum, not just a register
+export class PushInstruction extends FullRegisterInstruction {
 	get str() { return `push ${this.registerStr}` }
 }
-export class RetInstruction implements AssemblyInstruction {
+export class RetInstruction {
 	get str() { return 'ret' }
 }
-export class RorInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `ror ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class RorInstruction extends SrcDestInstruction {
+	get op() { return 'ror' }
 }
-export class SetInstruction implements AssemblyInstruction {
+export class SetInstruction {
 	constructor(readonly dest: Datum, readonly cond: JumpCond) {}
 	get str() { return `set${this.cond} ${datumToString(this.dest)}` }
 }
-export class ShlInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `shl ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class ShlInstruction extends SrcDestInstruction {
+	get op() { return 'shl' }
 }
-export class ShrInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `shr ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class ShrInstruction extends SrcDestInstruction {
+	get op() { return 'shr' }
 }
-export class SubInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `sub ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class SubInstruction extends SrcDestInstruction {
+	get op() { return 'sub' }
 }
-export class SysCallInstruction implements AssemblyInstruction {
+export class SysCallInstruction {
 	get str() { return 'syscall' }
 }
-export class TestInstruction implements AssemblyInstruction {
-	constructor(readonly op1: Datum, readonly op2: Datum) {}
-	get str() {
-		return `test ${datumToString(this.op1)}, ${datumToString(this.op2)}`
-	}
+export class TestInstruction extends SrcDestInstruction {
+	get op() { return 'test' }
 }
-export class XorInstruction implements AssemblyInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
-	get str() {
-		return `xor ${datumToString(this.src)}, ${datumToString(this.dest)}`
-	}
+export class XorInstruction extends SrcDestInstruction {
+	get op() { return 'xor' }
 }
 
 export const SYSCALL = {

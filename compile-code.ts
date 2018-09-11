@@ -20,11 +20,12 @@ const GENERAL_REGISTERS: asm.Register[] = [
 class BPRelative {
 	constructor(public readonly index: number) {}
 	get datum(): asm.Datum {
-		return {type: 'indirect', register: 'rbp', immediate: -8 * (this.index + 1)}
+		return {type: 'indirect', register: 'rbp', immediate: -(this.index + 1) << 3}
 	}
 }
 
 const functionLabel = (index: number) => `FUNC${index}`
+const returnLabel = (index: number) => `RETURN${index}`
 const memorySizeLabel = (index: number) => `MEMORY_SIZE${index}`
 const memoryStart = (index: number) => 0x100000000 * (index + 1)
 const globalLabel = (index: number) => `GLOBAL${index}`
@@ -64,7 +65,7 @@ class CompilationContext {
 	constructor(
 		readonly moduleContext: ModuleContext,
 		readonly functionsStats: Map<number, FunctionStats>,
-		private readonly functionIndex: number
+		readonly functionIndex: number
 	) {
 		const thisStats = functionsStats.get(functionIndex)!
 		const {params, locals, result} = thisStats
@@ -107,24 +108,28 @@ class CompilationContext {
 		this.pop()
 		return resolvedIndex instanceof BPRelative ? undefined : resolvedIndex
 	}
-	registersUsed(current?: true): Set<asm.Register> {
-		const toSave = new Set<asm.Register>()
-		const {params, locals} = this
-		for (let i = 0; i < params; i++) {
-			const resolved = this.resolveParam(i)
-			if (resolved instanceof BPRelative) return toSave
-			toSave.add(resolved)
+	// If wholeFunction is true, maxStackHeight is used and params are excluded
+	registersUsed(wholeFunction?: true): asm.Register[] {
+		const toSave: asm.Register[] = []
+		if (!wholeFunction) {
+			const {params} = this
+			for (let i = 0; i < params; i++) {
+				const resolved = this.resolveParam(i)
+				if (resolved instanceof BPRelative) return toSave
+				toSave.push(resolved)
+			}
 		}
+		const {locals} = this
 		for (let i = 0; i < locals; i++) {
 			const resolved = this.resolveLocal(i)
 			if (resolved instanceof BPRelative) return toSave
-			toSave.add(resolved)
+			toSave.push(resolved)
 		}
-		const stackHeight = current ? this.stackHeight : this.maxStackHeight
+		const stackHeight = wholeFunction ? this.maxStackHeight : this.stackHeight
 		for (let i = 0; i < stackHeight; i++) {
 			const resolved = this.resolveStack(i)
 			if (resolved instanceof BPRelative) return toSave
-			toSave.add(resolved)
+			toSave.push(resolved)
 		}
 		return toSave
 	}
@@ -169,6 +174,9 @@ const arithmeticOperations = new Map([
 	['xor', asm.XorInstruction]
 ])
 function compileInstruction(instruction: Instruction, context: CompilationContext, output: asm.AssemblyInstruction[]) {
+	output.push(new asm.Comment(
+		JSON.stringify(instruction, (_, v) => typeof v === 'bigint' ? Number(v) : v)
+	))
 	// console.log('Compiling', instruction.type, 'initial height', context.stackHeight)
 	switch (instruction.type) {
 		case 'unreachable':
@@ -187,29 +195,12 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		case 'nop':
 			break
-		case 'return': {
-			if (context.result) {
-				const result = context.resolvePop()
-				output.push(result
-					? new asm.MoveInstruction(
-							{type: 'register', register: result},
-							{type: 'register', register: RESULT_REGISTER}
-						)
-					: new asm.PopInstruction(RESULT_REGISTER)
-				)
-			}
-			let popCount = 0
-			while (context.stackHeight && !context.resolvePop()) popCount++
-			if (popCount) {
-				output.push(new asm.AddInstruction(
-					{type: 'immediate', value: popCount},
-					{type: 'register', register: 'rsp'}
-				))
-			}
-			if (context.usesBP) output.push(new asm.PopInstruction('rbp'))
-			output.push(new asm.RetInstruction)
+		case 'return':
+			output.push(new asm.JumpInstruction({
+				type: 'label',
+				label: returnLabel(context.functionIndex)
+			}))
 			break
-		}
 		case 'block':
 		case 'loop': {
 			const {type, returns, instructions} = instruction
@@ -243,7 +234,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				cond = INTERMEDIATE_REGISTERS[0]
 				output.push(new asm.PopInstruction(cond))
 			}
-			const datum: asm.Datum = {type: 'register', register: cond}
+			const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 			output.push(
 				new asm.TestInstruction(datum, datum),
 				new asm.JumpInstruction(
@@ -279,7 +270,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					cond = INTERMEDIATE_REGISTERS[0]
 					output.push(new asm.PopInstruction(cond))
 				}
-				const datum: asm.Datum = {type: 'register', register: cond}
+				const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 				output.push(
 					new asm.TestInstruction(datum, datum),
 					new asm.JumpInstruction({type: 'label', label: endLabel}, 'e')
@@ -318,7 +309,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			// TODO: can this context be cached to avoid recomputing the context for the same function?
 			const otherContext = new CompilationContext(context.moduleContext, context.functionsStats, func)
 			const {params, result} = otherContext
-			const registersUsed = context.registersUsed(true)
+			const registersUsed = new Set(context.registersUsed())
 			const toPush: asm.Register[] = []
 			// TODO: support passing params on the stack if too many are used
 			const argRegisters = new Array<asm.Register>(params)
@@ -330,8 +321,14 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				if (registersUsed.has(register)) toPush.push(register)
 				argRegisters[i] = register
 			}
-			// TODO: fix order here: cannot push toPush until params to callee have been set
-			for (const register of toPush) output.push(new asm.PushInstruction(register))
+			const pushedRegisters = toPush.length
+			for (let i = 0; i < pushedRegisters; i++) {
+				output.push(new asm.MoveInstruction(
+					{type: 'register', register: toPush[i]},
+					{type: 'indirect', register: 'rsp', immediate: -(i + 1) << 3}
+				))
+			}
+			let stackPopped = 0
 			for (const register of reverse(argRegisters)) {
 				const param = context.resolvePop()
 				if (param) {
@@ -342,9 +339,26 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 						))
 					}
 				}
-				else output.push(new asm.PopInstruction(register))
+				else {
+					output.push(new asm.PopInstruction(register))
+					stackPopped++
+				}
+			}
+			const spSub = stackPopped + pushedRegisters // point to end of pushedRegisters
+			if (spSub) {
+				output.push(new asm.SubInstruction(
+					{type: 'immediate', value: spSub << 3},
+					{type: 'register', register: 'rsp'}
+				))
 			}
 			output.push(new asm.CallInstruction({type: 'label', label: functionLabel(func)}))
+			for (const register of reverse(toPush)) output.push(new asm.PopInstruction(register))
+			if (stackPopped) { // point to actual stack location
+				output.push(new asm.AddInstruction(
+					{type: 'immediate', value: stackPopped << 3},
+					{type: 'register', register: 'rsp'}
+				))
+			}
 			if (result) {
 				const pushTo = context.resolvePush()
 				if (pushTo) {
@@ -355,12 +369,16 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				}
 				else output.push(new asm.PushInstruction(RESULT_REGISTER))
 			}
-			for (const register of reverse(toPush)) output.push(new asm.PopInstruction(register))
 			break
 		}
 		case 'drop': {
 			const operand = context.resolvePop()
-			if (!operand) output.push(new asm.IncInstruction({type: 'register', register: 'rsp'}))
+			if (!operand) {
+				output.push(new asm.AddInstruction(
+					{type: 'immediate', value: 8},
+					{type: 'register', register: 'rsp'}
+				))
+			}
 			break
 		}
 		case 'select': {
@@ -381,7 +399,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				ifTrue = INTERMEDIATE_REGISTERS[2]
 				output.push(new asm.PopInstruction(ifTrue))
 			}
-			const condDatum: asm.Datum = {type: 'register', register: cond}
+			const condDatum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 			output.push(
 				new asm.TestInstruction(condDatum, condDatum),
 				new asm.CMoveInstruction(
@@ -396,7 +414,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		}
 		case 'get_local': {
 			const {local} = instruction
-			const width = typeWidth(context.localTypes[local])
 			const resolvedLocal = context.resolveParam(local)
 			let target = context.resolvePush()
 			if (resolvedLocal instanceof BPRelative) {
@@ -404,15 +421,15 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				if (push) target = INTERMEDIATE_REGISTERS[0]
 				output.push(new asm.MoveInstruction(
 					resolvedLocal.datum,
-					{type: 'register', register: target!, width}
+					{type: 'register', register: target!}
 				))
 				if (push) output.push(new asm.PushInstruction(target!))
 			}
 			else {
 				output.push(target
 					? new asm.MoveInstruction(
-							{type: 'register', register: resolvedLocal, width},
-							{type: 'register', register: target, width}
+							{type: 'register', register: resolvedLocal},
+							{type: 'register', register: target}
 						)
 					: new asm.PushInstruction(resolvedLocal)
 				)
@@ -423,7 +440,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'tee_local': {
 			const {type, local} = instruction
 			const tee = type === 'tee_local'
-			const width = typeWidth(context.localTypes[local])
 			let value = context.resolvePop()
 			if (!value) {
 				value = INTERMEDIATE_REGISTERS[0]
@@ -437,10 +453,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			}
 			const resolvedLocal = context.resolveParam(local)
 			output.push(new asm.MoveInstruction(
-				{type: 'register', register: value!, width},
+				{type: 'register', register: value!},
 				resolvedLocal instanceof BPRelative
 					? resolvedLocal.datum
-					: {type: 'register', register: resolvedLocal, width}
+					: {type: 'register', register: resolvedLocal}
 			))
 			if (tee) context.push()
 			break
@@ -516,7 +532,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			let index = context.resolvePop()
 			if (!index) {
 				index = INTERMEDIATE_REGISTERS[1]
-				output.push(new asm.PopInstruction(value))
+				output.push(new asm.PopInstruction(index))
 			}
 			const width = instruction.type === 'i32.store8' ? 'b' :
 				instruction.type === 'i32.store16' ? 'w' : 'l'
@@ -549,7 +565,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				pages = pagesAddRegister
 				output.push(new asm.PopInstruction(pages))
 			}
-			const registersUsed = context.registersUsed(true)
+			const registersUsed = new Set(context.registersUsed())
 			const toPush: asm.Register[] = []
 			for (const register of MMAP_SYSCALL_REGISTERS) {
 				if (registersUsed.has(register)) toPush.push(register)
@@ -700,7 +716,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 	// console.log('\t', context.stackHeight)
 }
 
-// TODO: save callee-save registers
 export function compileModule(module: Section[]): asm.AssemblyInstruction[] {
 	const initInstructions: asm.AssemblyInstruction[] = []
 	let types: FunctionType[] | undefined
@@ -762,27 +777,50 @@ export function compileModule(module: Section[]): asm.AssemblyInstruction[] {
 	const {segments} = codeSection
 	for (let i = 0; i < segments.length; i++) {
 		const context = new CompilationContext(moduleContext, functionsStats, i)
-		const {usesBP} = context
-		if (usesBP) {
-			assemblySections.push([
-				new asm.PushInstruction('rbp'),
-				new asm.MoveInstruction(
-					{type: 'register', register: 'rsp'},
-					{type: 'register', register: 'rbp'}
-				)
-			])
-		}
 		const bodyAssembly: asm.AssemblyInstruction[] = []
 		const {instructions} = segments[i]
 		for (const instruction of instructions) {
 			compileInstruction(instruction, context, bodyAssembly)
 		}
-		if (!(instructions.length && instructions.slice(-1)[0].type === 'return')) {
-			compileInstruction({type: 'return'}, context, bodyAssembly)
+		const registersUsed = context.registersUsed(true)
+		const saveInstructions: asm.AssemblyInstruction[] = []
+		for (const register of registersUsed) {
+			saveInstructions.push(new asm.PushInstruction(register))
 		}
+		if (context.usesBP) {
+			saveInstructions.push(new asm.MoveInstruction(
+				{type: 'register', register: 'rsp'},
+				{type: 'register', register: 'rbp'}
+			))
+		}
+		const returnInstructions: asm.AssemblyInstruction[] = [new asm.Label(returnLabel(i))]
+		if (context.result) {
+			const result = context.resolvePop()
+			returnInstructions.push(result
+				? new asm.MoveInstruction(
+						{type: 'register', register: result},
+						{type: 'register', register: RESULT_REGISTER}
+					)
+				: new asm.PopInstruction(RESULT_REGISTER)
+			)
+		}
+		let popCount = 0
+		while (context.stackHeight && !context.resolvePop()) popCount++
+		if (popCount) {
+			returnInstructions.push(new asm.AddInstruction(
+				{type: 'immediate', value: popCount << 3},
+				{type: 'register', register: 'rsp'}
+			))
+		}
+		for (const register of reverse(registersUsed)) {
+			returnInstructions.push(new asm.PopInstruction(register))
+		}
+		returnInstructions.push(new asm.RetInstruction)
 		assemblySections.push(
 			[new asm.Label(functionLabel(i))],
-			bodyAssembly
+			saveInstructions,
+			bodyAssembly,
+			returnInstructions
 		)
 	}
 	return flatten(assemblySections)
