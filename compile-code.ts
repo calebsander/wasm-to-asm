@@ -24,11 +24,6 @@ class BPRelative {
 	}
 }
 
-const functionLabel = (index: number) => `FUNC${index}`
-const returnLabel = (index: number) => `RETURN${index}`
-const memorySizeLabel = (index: number) => `MEMORY_SIZE${index}`
-const memoryStart = (index: number) => 0x100000000 * (index + 1)
-const globalLabel = (index: number) => `GLOBAL${index}`
 const typeWidth = (type: ValueType): asm.Width =>
 	type === 'i32' ? 'l' : 'q'
 
@@ -49,12 +44,31 @@ class ModuleContext {
 		readonly index: number,
 		readonly globalTypes: ValueType[]
 	) {}
+
+	get initLabel(): string {
+		return `MODULE${this.index}_INIT`
+	}
+	globalLabel(index: number): string {
+		return `MODULE${this.index}_GLOBAL${index}`
+	}
+	functionLabel(index: number): string {
+		return `MODULE${this.index}_FUNC${index}`
+	}
+	returnLabel(index: number): string {
+		return `MODULE${this.index}_RETURN${index}`
+	}
+	get memorySizeLabel(): string {
+		return `MODULE${this.index}_MEMSIZE`
+	}
+	get memoryStart(): number {
+		return 0x100000000 * (this.index + 1)
+	}
 }
 // TODO: support f32 and f64 values
 class CompilationContext {
 	readonly params: number
 	readonly locals: number
-	readonly result: number // should be boolean; see https://github.com/Microsoft/TypeScript/issues/26978
+	readonly result: boolean
 	readonly localTypes: ReadonlyArray<ValueType>
 	public stackHeight = 0
 	private maxStackHeight = 0
@@ -71,7 +85,7 @@ class CompilationContext {
 		const {params, locals, result} = thisStats
 		this.params = params.length
 		this.locals = locals.length
-		this.result = +result
+		this.result = result
 		this.localTypes = params.concat(locals)
 		this.generalRegisters = GENERAL_REGISTERS
 		if (this.usesBP) {
@@ -134,7 +148,7 @@ class CompilationContext {
 		return toSave
 	}
 	makeLabel(prefix: string): string {
-		return `${functionLabel(this.functionIndex)}_${prefix}${++this.labelCount}`
+		return `${this.moduleContext.functionLabel(this.functionIndex)}_${prefix}${++this.labelCount}`
 	}
 	get usesBP(): boolean {
 		return this.resolveLocal(this.locals - 1) instanceof BPRelative
@@ -198,7 +212,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'return':
 			output.push(new asm.JumpInstruction({
 				type: 'label',
-				label: returnLabel(context.functionIndex)
+				label: context.moduleContext.returnLabel(context.functionIndex)
 			}))
 			break
 		case 'block':
@@ -351,7 +365,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					{type: 'register', register: 'rsp'}
 				))
 			}
-			output.push(new asm.CallInstruction({type: 'label', label: functionLabel(func)}))
+			output.push(new asm.CallInstruction({
+				type: 'label',
+				label: context.moduleContext.functionLabel(func)
+			}))
 			for (const register of reverse(toPush)) output.push(new asm.PopInstruction(register))
 			if (stackPopped) { // point to actual stack location
 				output.push(new asm.AddInstruction(
@@ -468,7 +485,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const push = !target
 			if (push) target = INTERMEDIATE_REGISTERS[0]
 			output.push(new asm.MoveInstruction(
-				{type: 'label', label: globalLabel(global)},
+				{type: 'label', label: context.moduleContext.globalLabel(global)},
 				{type: 'register', register: target!, width}
 			))
 			if (push) output.push(new asm.PushInstruction(target!))
@@ -484,7 +501,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			}
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value, width},
-				{type: 'label', label: globalLabel(global)}
+				{type: 'label', label: context.moduleContext.globalLabel(global)}
 			))
 			break
 		}
@@ -505,7 +522,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const source: asm.Datum = {
 				type: 'indirect',
 				register: index,
-				immediate: memoryStart(context.moduleContext.index) + offset
+				immediate: context.moduleContext.memoryStart + offset
 			}
 			const targetDatum: asm.Datum = {type: 'register', register: target!, width: 'l'}
 			const {type} = instruction
@@ -541,7 +558,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				{
 					type: 'indirect',
 					register: index,
-					immediate: memoryStart(context.moduleContext.index) + offset
+					immediate: context.moduleContext.memoryStart + offset
 				}
 			))
 			break
@@ -551,7 +568,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const push = !target
 			if (push) target = INTERMEDIATE_REGISTERS[0]
 			output.push(new asm.MoveInstruction(
-				{type: 'label', label: memorySizeLabel(context.moduleContext.index)},
+				{type: 'label', label: context.moduleContext.memorySizeLabel},
 				{type: 'register', register: target!}
 			))
 			if (push) output.push(new asm.PushInstruction(target!))
@@ -559,7 +576,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		}
 		case 'memory.grow': {
 			const pagesAddRegister = 'rsi'
-			const memory = context.moduleContext.index
 			let pages = context.resolvePop()
 			if (!pages) {
 				pages = pagesAddRegister
@@ -571,7 +587,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				if (registersUsed.has(register)) toPush.push(register)
 			}
 			for (const register of toPush) output.push(new asm.PushInstruction(register))
-			const sizeLabel: asm.Datum = {type: 'label', label: memorySizeLabel(memory)}
+			const sizeLabel: asm.Datum = {type: 'label', label: context.moduleContext.memorySizeLabel}
 			const addrDatum: asm.Datum = {type: 'register', register: 'rdi'}
 			const addrDatum32: asm.Datum = {...addrDatum, width: 'l'}
 			output.push(
@@ -581,7 +597,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				),
 				new asm.MoveInstruction(sizeLabel, addrDatum32),
 				new asm.ShlInstruction(PAGE_BITS, addrDatum),
-				new asm.AddInstruction({type: 'immediate', value: memoryStart(memory)}, addrDatum)
+				new asm.AddInstruction(
+					{type: 'immediate', value: context.moduleContext.memoryStart},
+					addrDatum
+				)
 			)
 			if (pages !== pagesAddRegister) {
 				output.push(new asm.MoveInstruction(
@@ -716,7 +735,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 	// console.log('\t', context.stackHeight)
 }
 
-export function compileModule(module: Section[]): asm.AssemblyInstruction[] {
+export function compileModule(module: Section[], index: number): asm.AssemblyInstruction[] {
 	const initInstructions: asm.AssemblyInstruction[] = []
 	let types: FunctionType[] | undefined
 	let functionsTypes: FunctionType[] | undefined
@@ -746,19 +765,20 @@ export function compileModule(module: Section[]): asm.AssemblyInstruction[] {
 				break
 			case 'global':
 				const {globals} = section
-				// TODO: give each module its own memory index
-				moduleContext = new ModuleContext(0, globals.map(({type}) => type.type))
+				moduleContext = new ModuleContext(index, globals.map(({type}) => type.type))
 				const globalContext = new CompilationContext(
 					moduleContext,
 					new Map([[0, {params: [], locals: [], result: false}]]),
 					0
 				)
+				initInstructions.push(new asm.Label(moduleContext.initLabel))
 				for (let global = 0; global < globals.length; global++) {
 					for (const instruction of globals[global].initializer) {
 						compileInstruction(instruction, globalContext, initInstructions)
 					}
 					compileInstruction({type: 'set_global', global}, globalContext, initInstructions)
 				}
+				initInstructions.push(new asm.RetInstruction)
 		}
 	}
 	if (!(functionsTypes && functionsLocals && moduleContext && codeSection)) {
@@ -793,7 +813,9 @@ export function compileModule(module: Section[]): asm.AssemblyInstruction[] {
 				{type: 'register', register: 'rbp'}
 			))
 		}
-		const returnInstructions: asm.AssemblyInstruction[] = [new asm.Label(returnLabel(i))]
+		const returnInstructions: asm.AssemblyInstruction[] = [
+			new asm.Label(context.moduleContext.returnLabel(i))
+		]
 		if (context.result) {
 			const result = context.resolvePop()
 			returnInstructions.push(result
@@ -817,7 +839,7 @@ export function compileModule(module: Section[]): asm.AssemblyInstruction[] {
 		}
 		returnInstructions.push(new asm.RetInstruction)
 		assemblySections.push(
-			[new asm.Label(functionLabel(i))],
+			[new asm.Label(context.moduleContext.functionLabel(i))],
 			saveInstructions,
 			bodyAssembly,
 			returnInstructions
