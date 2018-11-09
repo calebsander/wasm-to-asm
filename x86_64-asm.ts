@@ -23,6 +23,12 @@ export type JumpCond
 	| 'a' | 'b'
 	| 'ae' | 'be'
 
+export type GASDirective
+	= {type: 'text' | 'data', args?: void}
+	| {type: 'globl', args: [string]}
+	| {type: 'long' | 'quad', args: [number]}
+	| {type: 'balign', args: [number]}
+
 function registerToString(register: Register, width: Width = 'q') {
 	switch (width) {
 		case 'b':
@@ -79,13 +85,20 @@ abstract class FullRegisterInstruction {
 		return datumToString({type: 'register', register: this.register})
 	}
 }
+export class Directive {
+	constructor(readonly directive: GASDirective) {}
+	get str() {
+		const {type, args} = this.directive
+		return `.${type}${args ? ' ' + args.join(' ') : ''}`
+	}
+}
 export class Label {
 	constructor(readonly label: string) {}
 	get str() { return this.label + ':' }
 }
 export class Comment {
 	constructor(readonly comment: string) {}
-	get str() { return '; ' + this.comment }
+	get str() { return '# ' + this.comment }
 }
 export class AddInstruction extends SrcDestInstruction {
 	get op() { return 'add' }

@@ -1,5 +1,5 @@
 import {Instruction} from './parse-instruction'
-import {CodeSection, FunctionType, Section} from './parse-module'
+import {CodeSection, Export, FunctionType, Global, Section} from './parse-module'
 import {ValueType} from './parse-value-type'
 import * as asm from './x86_64-asm'
 
@@ -16,6 +16,7 @@ const GENERAL_REGISTERS: asm.Register[] = [
 	'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15',
 	'rbp'
 ]
+const SHIFT_REGISTER: asm.Register = 'rcx'
 
 class BPRelative {
 	constructor(public readonly index: number) {}
@@ -40,11 +41,26 @@ interface FunctionStats {
 }
 
 class ModuleContext {
-	constructor(
-		readonly index: number,
-		readonly globalTypes: ValueType[]
-	) {}
+	readonly globalTypes: ValueType[] = []
+	readonly exportFunctions = new Map<number, string[]>()
+	readonly exportGlobals = new Map<number, string[]>()
 
+	constructor(readonly index: number) {}
+
+	addGlobals(globals: Global[]): void {
+		this.globalTypes.push(...globals.map(({type}) => type.type))
+	}
+	addExports(exports: Export[]): void {
+		for (const {name, description: {type, index}} of exports) {
+			const exportMap =
+				type === 'function' ? this.exportFunctions :
+				type === 'global' ? this.exportGlobals :
+				new Map<number, string[]>()
+			const names = exportMap.get(index)
+			if (names) names.push(name)
+			else exportMap.set(index, [name])
+		}
+	}
 	get initLabel(): string {
 		return `MODULE${this.index}_INIT`
 	}
@@ -56,6 +72,9 @@ class ModuleContext {
 	}
 	returnLabel(index: number): string {
 		return `MODULE${this.index}_RETURN${index}`
+	}
+	exportLabel(type: string, name: string): string {
+		return `MODULE${this.index}_EXPORT_${type}_${name}`
 	}
 	get memorySizeLabel(): string {
 		return `MODULE${this.index}_MEMSIZE`
@@ -186,6 +205,21 @@ const arithmeticOperations = new Map([
 	['shr_u', asm.ShrInstruction],
 	['rotr', asm.RorInstruction],
 	['xor', asm.XorInstruction]
+])
+const SHIFT_OPERATIONS = new Set(['shl', 'shr_s', 'shr_u', 'rotl', 'rotr'])
+interface GlobalDirective {
+	align: asm.Directive
+	data: asm.Directive
+}
+const WASM_TYPE_DIRECTIVES = new Map<ValueType, GlobalDirective>([
+	['i32', {
+		align: new asm.Directive({type: 'balign', args: [4]}),
+		data: new asm.Directive({type: 'long', args: [0]})
+	}],
+	['i64', {
+		align: new asm.Directive({type: 'balign', args: [8]}),
+		data: new asm.Directive({type: 'quad', args: [0]})
+	}]
 ])
 function compileInstruction(instruction: Instruction, context: CompilationContext, output: asm.AssemblyInstruction[]) {
 	output.push(new asm.Comment(
@@ -511,20 +545,22 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.load16_s':
 		case 'i32.load16_u': {
 			const {offset} = instruction.access
-			let index = context.resolvePop()
-			if (!index) {
-				index = INTERMEDIATE_REGISTERS[0]
-				output.push(new asm.PopInstruction(index))
+			let register = context.resolvePop()
+			const onStack = !register
+			if (!register) {
+				register = INTERMEDIATE_REGISTERS[0]
+				output.push(new asm.PopInstruction(register))
 			}
-			let target = context.resolvePush()
-			const push = !target
-			if (push) target = INTERMEDIATE_REGISTERS[0]
-			const source: asm.Datum = {
-				type: 'indirect',
-				register: index,
-				immediate: context.moduleContext.memoryStart + offset
-			}
-			const targetDatum: asm.Datum = {type: 'register', register: target!, width: 'l'}
+			const address: asm.Datum = {type: 'register', register: INTERMEDIATE_REGISTERS[1]}
+			output.push(
+				new asm.MoveInstruction(
+					{type: 'immediate', value: context.moduleContext.memoryStart + offset},
+					address
+				),
+				new asm.AddInstruction({type: 'register', register}, address)
+			)
+			const source: asm.Datum = {...address, type: 'indirect'}
+			const targetDatum: asm.Datum = {type: 'register', register, width: 'l'}
 			const {type} = instruction
 			if (type === 'i32.load') {
 				output.push(new asm.MoveInstruction(source, targetDatum))
@@ -534,7 +570,8 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				const width = type.startsWith('i32.load8') ? 'b' : 'w'
 				output.push(new asm.MoveExtendInstruction(source, targetDatum, width, 'l', signed))
 			}
-			if (push) output.push(new asm.PushInstruction(target!))
+			if (onStack) output.push(new asm.PushInstruction(register))
+			context.push()
 			break
 		}
 		case 'i32.store':
@@ -551,15 +588,19 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				index = INTERMEDIATE_REGISTERS[1]
 				output.push(new asm.PopInstruction(index))
 			}
+			const address: asm.Datum = {type: 'register', register: INTERMEDIATE_REGISTERS[2]}
+			output.push(
+				new asm.MoveInstruction(
+					{type: 'immediate', value: context.moduleContext.memoryStart + offset},
+					address
+				),
+				new asm.AddInstruction({type: 'register', register: index}, address)
+			)
 			const width = instruction.type === 'i32.store8' ? 'b' :
 				instruction.type === 'i32.store16' ? 'w' : 'l'
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value, width},
-				{
-					type: 'indirect',
-					register: index,
-					immediate: context.moduleContext.memoryStart + offset
-				}
+				{...address, type: 'indirect'}
 			))
 			break
 		}
@@ -597,10 +638,11 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				),
 				new asm.MoveInstruction(sizeLabel, addrDatum32),
 				new asm.ShlInstruction(PAGE_BITS, addrDatum),
-				new asm.AddInstruction(
+				new asm.MoveInstruction( // must mov 64-bit immediate to intermediate register
 					{type: 'immediate', value: context.moduleContext.memoryStart},
-					addrDatum
-				)
+					{type: 'register', register: 'rsi'}
+				),
+				new asm.AddInstruction({type: 'register', register: 'rsi'}, addrDatum)
 			)
 			if (pages !== pagesAddRegister) {
 				output.push(new asm.MoveInstruction(
@@ -689,27 +731,45 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.xor':
 		case 'i64.shl':
 		case 'i64.shr_u': {
-			let shift = context.resolvePop()
-			if (!shift) {
-				shift = INTERMEDIATE_REGISTERS[0]
-				output.push(new asm.PopInstruction(shift))
-			}
-			let value = context.resolvePop()
-			const pushResult = !value
-			if (pushResult) {
-				value = INTERMEDIATE_REGISTERS[1]
-				output.push(new asm.PopInstruction(value))
-			}
 			const [type, operation] = instruction.type.split('.')
+			const shift = SHIFT_OPERATIONS.has(operation)
+			const saveShiftRegister = shift && context.registersUsed().includes(SHIFT_REGISTER)
+				? INTERMEDIATE_REGISTERS[2]
+				: undefined
+			if (saveShiftRegister) {
+				output.push(new asm.MoveInstruction(
+					{type: 'register', register: SHIFT_REGISTER},
+					{type: 'register', register: saveShiftRegister}
+				))
+			}
+			let operand2 = context.resolvePop()
+			if (!operand2) {
+				operand2 = INTERMEDIATE_REGISTERS[0]
+				output.push(new asm.PopInstruction(operand2))
+			}
+			let operand1 = context.resolvePop()
+			const pushResult = !operand1
+			if (pushResult) {
+				operand1 = INTERMEDIATE_REGISTERS[1]
+				output.push(new asm.PopInstruction(operand1))
+			}
 			const arithmeticInstruction = arithmeticOperations.get(operation)
 			if (!arithmeticInstruction) throw new Error(`No arithmetic instruction found for ${instruction.type}`)
 			const width = typeWidth(type as ValueType)
 			output.push(new arithmeticInstruction(
-				{type: 'register', register: shift, width},
-				{type: 'register', register: value!, width}
+				shift
+					? {type: 'register', register: SHIFT_REGISTER, width: 'b'}
+					: {type: 'register', register: operand2, width},
+				{type: 'register', register: operand1!, width}
 			))
 			context.push()
-			if (pushResult) output.push(new asm.PushInstruction(value!))
+			if (pushResult) output.push(new asm.PushInstruction(operand1!))
+			if (saveShiftRegister) {
+				output.push(new asm.MoveInstruction(
+					{type: 'register', register: saveShiftRegister},
+					{type: 'register', register: SHIFT_REGISTER}
+				))
+			}
 			break
 		}
 		case 'i32.wrap': {
@@ -736,11 +796,11 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 }
 
 export function compileModule(module: Section[], index: number): asm.AssemblyInstruction[] {
-	const initInstructions: asm.AssemblyInstruction[] = []
+	const initInstructions: asm.AssemblyInstruction[] = [new asm.Directive({type: 'text'})]
 	let types: FunctionType[] | undefined
 	let functionsTypes: FunctionType[] | undefined
 	let functionsLocals: ValueType[][] | undefined
-	let moduleContext: ModuleContext | undefined
+	const moduleContext = new ModuleContext(index)
 	let codeSection: CodeSection | undefined
 	for (const section of module) {
 		switch (section.type) {
@@ -765,7 +825,7 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 				break
 			case 'global':
 				const {globals} = section
-				moduleContext = new ModuleContext(index, globals.map(({type}) => type.type))
+				moduleContext.addGlobals(globals)
 				const globalContext = new CompilationContext(
 					moduleContext,
 					new Map([[0, {params: [], locals: [], result: false}]]),
@@ -779,9 +839,12 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 					compileInstruction({type: 'set_global', global}, globalContext, initInstructions)
 				}
 				initInstructions.push(new asm.RetInstruction)
+				break
+			case 'export':
+				moduleContext.addExports(section.exports)
 		}
 	}
-	if (!(functionsTypes && functionsLocals && moduleContext && codeSection)) {
+	if (!(functionsTypes && functionsLocals && codeSection)) {
 		throw new Error('Expected function and code sections')
 	}
 	const functionsStats = new Map<number, FunctionStats>()
@@ -793,7 +856,25 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 			result: !!results.length
 		})
 	}
-	const assemblySections = [initInstructions]
+	const {globalTypes} = moduleContext
+	const globalInstructions: asm.AssemblyInstruction[] = [new asm.Directive({type: 'data'})]
+	for (let i = 0; i < globalTypes.length; i++) {
+		const directives = WASM_TYPE_DIRECTIVES.get(globalTypes[i])
+		if (!directives) throw new Error('Unable to emit global of type ' + globalTypes[i])
+		globalInstructions.push(directives.align)
+		for (const label of moduleContext.exportGlobals.get(i) || []) {
+			const exportLabel = moduleContext.exportLabel('GLOBAL', label)
+			globalInstructions.push(
+				new asm.Directive({type: 'globl', args: [exportLabel]}),
+				new asm.Label(exportLabel)
+			)
+		}
+		globalInstructions.push(
+			new asm.Label(moduleContext.globalLabel(i)),
+			directives.data
+		)
+	}
+	const assemblySections = [globalInstructions, initInstructions]
 	const {segments} = codeSection
 	for (let i = 0; i < segments.length; i++) {
 		const context = new CompilationContext(moduleContext, functionsStats, i)
@@ -838,8 +919,17 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 			returnInstructions.push(new asm.PopInstruction(register))
 		}
 		returnInstructions.push(new asm.RetInstruction)
+		const labels: asm.AssemblyInstruction[] = []
+		for (const label of moduleContext.exportFunctions.get(i) || []) {
+			const exportLabel = moduleContext.exportLabel('FUNC', label)
+			labels.push(
+				new asm.Directive({type: 'globl', args: [exportLabel]}),
+				new asm.Label(exportLabel)
+			)
+		}
+		labels.push(new asm.Label(context.moduleContext.functionLabel(i)))
 		assemblySections.push(
-			[new asm.Label(context.moduleContext.functionLabel(i))],
+			labels,
 			saveInstructions,
 			bodyAssembly,
 			returnInstructions

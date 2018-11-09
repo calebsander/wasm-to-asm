@@ -38,7 +38,7 @@ interface Import {
 	name: string
 	description: ImportDescription
 }
-interface Global {
+export interface Global {
 	type: GlobalType
 	initializer: Instruction[]
 }
@@ -46,7 +46,7 @@ interface ExportDescription {
 	type: 'function' | 'table' | 'memory' | 'global'
 	index: number
 }
-interface Export {
+export interface Export {
 	name: string
 	description: ExportDescription
 }
