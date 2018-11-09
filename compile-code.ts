@@ -225,7 +225,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 	output.push(new asm.Comment(
 		JSON.stringify(instruction, (_, v) => typeof v === 'bigint' ? Number(v) : v)
 	))
-	// console.log('Compiling', instruction.type, 'initial height', context.stackHeight)
 	switch (instruction.type) {
 		case 'unreachable':
 			// exit(0xFF)
@@ -244,10 +243,9 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'nop':
 			break
 		case 'return':
-			output.push(new asm.JumpInstruction({
-				type: 'label',
-				label: context.moduleContext.returnLabel(context.functionIndex)
-			}))
+			output.push(new asm.JumpInstruction(
+				context.moduleContext.returnLabel(context.functionIndex)
+			))
 			break
 		case 'block':
 		case 'loop': {
@@ -285,10 +283,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 			output.push(
 				new asm.TestInstruction(datum, datum),
-				new asm.JumpInstruction(
-					{type: 'label', label: hasElse ? elseLabel! : endLabel},
-					'e'
-				)
+				new asm.JumpInstruction(hasElse ? elseLabel! : endLabel, 'e')
 			)
 			for (const instruction of ifInstructions) compileInstruction(instruction, context, output)
 			if (hasElse) {
@@ -299,7 +294,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					result: returns !== 'empty'
 				})
 				output.push(
-					new asm.JumpInstruction({type: 'label', label: endLabel}),
+					new asm.JumpInstruction(endLabel),
 					new asm.Label(elseLabel)
 				)
 				for (const instruction of elseInstructions) compileInstruction(instruction, context, output)
@@ -321,7 +316,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 				output.push(
 					new asm.TestInstruction(datum, datum),
-					new asm.JumpInstruction({type: 'label', label: endLabel}, 'e')
+					new asm.JumpInstruction(endLabel, 'e')
 				)
 			}
 			const {containingLabels} = context
@@ -348,7 +343,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				))
 			}
 			if (moveResult) executePush(context, output, INTERMEDIATE_REGISTERS[0])
-			output.push(new asm.JumpInstruction({type: 'label', label}))
+			output.push(new asm.JumpInstruction(label))
 			if (endLabel) output.push(new asm.Label(endLabel))
 			break
 		}
@@ -399,10 +394,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					{type: 'register', register: 'rsp'}
 				))
 			}
-			output.push(new asm.CallInstruction({
-				type: 'label',
-				label: context.moduleContext.functionLabel(func)
-			}))
+			output.push(new asm.CallInstruction(context.moduleContext.functionLabel(func)))
 			for (const register of reverse(toPush)) output.push(new asm.PopInstruction(register))
 			if (stackPopped) { // point to actual stack location
 				output.push(new asm.AddInstruction(
@@ -673,6 +665,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				new asm.AddInstruction({type: 'register', register: pagesAddRegister, width: 'l'}, sizeLabel)
 			)
 			if (push) output.push(new asm.PushInstruction(target!))
+			// TODO: handle mmap failure (return -1)
 			break
 		}
 		case 'i32.const':
@@ -792,16 +785,24 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		default:
 			throw new Error(`Unable to compile instruction of type ${instruction.type}`)
 	}
-	// console.log('\t', context.stackHeight)
 }
 
 export function compileModule(module: Section[], index: number): asm.AssemblyInstruction[] {
-	const initInstructions: asm.AssemblyInstruction[] = [new asm.Directive({type: 'text'})]
 	let types: FunctionType[] | undefined
 	let functionsTypes: FunctionType[] | undefined
 	let functionsLocals: ValueType[][] | undefined
 	const moduleContext = new ModuleContext(index)
+	const globalContext = new CompilationContext(
+		moduleContext,
+		new Map([[0, {params: [], locals: [], result: false}]]),
+		0
+	)
 	let codeSection: CodeSection | undefined
+	let memoriesCount = 0
+	const initInstructions: asm.AssemblyInstruction[] = [
+		new asm.Directive({type: 'text'}),
+		new asm.Label(moduleContext.initLabel)
+	]
 	for (const section of module) {
 		switch (section.type) {
 			case 'type':
@@ -823,27 +824,35 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 					functionsLocals[i] = segments[i].locals
 				}
 				break
+			case 'memory':
+				const {memories} = section
+				memoriesCount += memories.length
+				if (memoriesCount > 1) throw new Error('Multiple memories')
+				if (!memoriesCount) break
+				const memoryInitInstructions: Instruction[] = [
+					{type: 'i32.const', value: memories[0].min},
+					{type: 'memory.grow'},
+					{type: 'drop'}
+				]
+				for (const instruction of memoryInitInstructions) {
+					compileInstruction(instruction, globalContext, initInstructions)
+				}
+				break
 			case 'global':
 				const {globals} = section
 				moduleContext.addGlobals(globals)
-				const globalContext = new CompilationContext(
-					moduleContext,
-					new Map([[0, {params: [], locals: [], result: false}]]),
-					0
-				)
-				initInstructions.push(new asm.Label(moduleContext.initLabel))
 				for (let global = 0; global < globals.length; global++) {
 					for (const instruction of globals[global].initializer) {
 						compileInstruction(instruction, globalContext, initInstructions)
 					}
 					compileInstruction({type: 'set_global', global}, globalContext, initInstructions)
 				}
-				initInstructions.push(new asm.RetInstruction)
 				break
 			case 'export':
 				moduleContext.addExports(section.exports)
 		}
 	}
+	initInstructions.push(new asm.RetInstruction)
 	if (!(functionsTypes && functionsLocals && codeSection)) {
 		throw new Error('Expected function and code sections')
 	}
@@ -857,7 +866,12 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 		})
 	}
 	const {globalTypes} = moduleContext
-	const globalInstructions: asm.AssemblyInstruction[] = [new asm.Directive({type: 'data'})]
+	const globalInstructions: asm.AssemblyInstruction[] = [
+		new asm.Directive({type: 'data'}),
+		new asm.Directive({type: 'balign', args: [4]}),
+		new asm.Label(moduleContext.memorySizeLabel),
+		new asm.Directive({type: 'long', args: [0]})
+	]
 	for (let i = 0; i < globalTypes.length; i++) {
 		const directives = WASM_TYPE_DIRECTIVES.get(globalTypes[i])
 		if (!directives) throw new Error('Unable to emit global of type ' + globalTypes[i])

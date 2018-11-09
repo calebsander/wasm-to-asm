@@ -63,7 +63,7 @@ function datumToString(datum: Datum): string {
 			if (offset) result += `, %${offset.register}, ${offset.scale}`
 			return result + ')'
 		}
-		case 'label': return datum.label
+		case 'label': return `${datum.label}(%rip)`
 		case 'immediate': return `$${datum.value}`
 	}
 }
@@ -107,8 +107,8 @@ export class AndInstruction extends SrcDestInstruction {
 	get op() { return 'and' }
 }
 export class CallInstruction {
-	constructor(readonly target: Datum) {}
-	get str() { return `call ${datumToString(this.target)}` }
+	constructor(readonly target: string) {}
+	get str() { return 'call ' + this.target }
 }
 export class CMoveInstruction extends SrcDestInstruction {
 	constructor(src: Datum, dest: Datum, readonly cond: JumpCond) {
@@ -120,8 +120,8 @@ export class CmpInstruction extends SrcDestInstruction {
 	get op() { return 'cmp' }
 }
 export class JumpInstruction {
-	constructor(readonly target: Datum, readonly cond?: JumpCond) {}
-	get str() { return `j${this.cond || 'mp'} ${datumToString(this.target)}` }
+	constructor(readonly target: string, readonly cond?: JumpCond) {}
+	get str() { return `j${this.cond || 'mp'} ${this.target}` }
 }
 export class MoveInstruction extends SrcDestInstruction {
 	get op() { return 'mov' }
