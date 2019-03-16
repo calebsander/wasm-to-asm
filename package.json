@@ -11,6 +11,6 @@
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^10.9.4",
-		"typescript": "next"
+		"typescript": "^3.3.3333"
 	}
 }

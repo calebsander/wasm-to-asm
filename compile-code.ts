@@ -1,5 +1,6 @@
+import {getCType, HeaderDeclaration} from './c-header'
 import {Instruction} from './parse-instruction'
-import {CodeSection, Export, FunctionType, Global, Section} from './parse-module'
+import {CodeSection, Export, FunctionType, Global, Import, Section} from './parse-module'
 import {ValueType} from './parse-value-type'
 import * as asm from './x86_64-asm'
 
@@ -17,6 +18,10 @@ const GENERAL_REGISTERS: asm.Register[] = [
 	'rbp'
 ]
 const SHIFT_REGISTER: asm.Register = 'rcx'
+const SYSV_PARAM_REGISTERS: asm.Register[] =
+	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
+	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
 
 class BPRelative {
 	constructor(public readonly index: number) {}
@@ -33,19 +38,31 @@ interface BlockReference {
 	stackHeight: number
 	result: boolean
 }
-
 interface FunctionStats {
 	params: ValueType[]
 	locals: ValueType[]
 	result: boolean
 }
 
+interface ImportReference {
+	modulePrefix: string
+	name: string
+}
+export interface ModuleIndices {
+	[module: string]: number
+}
 class ModuleContext {
-	readonly globalTypes: ValueType[] = []
 	readonly exportFunctions = new Map<number, string[]>()
 	readonly exportGlobals = new Map<number, string[]>()
+	readonly globalTypes: ValueType[] = []
+	private readonly importFunctions: ImportReference[] = []
+	private readonly importGlobals: ImportReference[] = []
+	private readonly importGlobalTypes: ValueType[] = []
 
-	constructor(readonly index: number) {}
+	constructor(
+		readonly index: number,
+		readonly moduleIndices: ModuleIndices
+	) {}
 
 	addGlobals(globals: Global[]): void {
 		this.globalTypes.push(...globals.map(({type}) => type.type))
@@ -61,23 +78,78 @@ class ModuleContext {
 			else exportMap.set(index, [name])
 		}
 	}
+	addImports(imports: Import[]) {
+		for (const {module, name, description} of imports) {
+			const moduleIndex = this.moduleIndices[module] as number | undefined
+			if (moduleIndex === undefined) throw new Error('No such module: ' + module)
+			const modulePrefix = ModuleContext.modulePrefix(moduleIndex)
+			let importMap: ImportReference[] | undefined
+			switch (description.type) {
+				case 'function':
+					importMap = this.importFunctions
+					break
+				case 'global':
+					importMap = this.importGlobals
+					this.importGlobalTypes.push(description.valueType.type)
+			}
+			if (importMap) importMap.push({modulePrefix, name})
+		}
+	}
+	private get baseFunctionIndex(): number {
+		return this.importFunctions.length
+	}
+	private get baseGlobalIndex(): number {
+		return this.importGlobals.length
+	}
+	resolveGlobalWidth(index: number): asm.Width {
+		const moduleGlobalIndex = index - this.baseGlobalIndex
+		return typeWidth(moduleGlobalIndex < 0
+			? this.importGlobalTypes[index]
+			: this.globalTypes[moduleGlobalIndex]
+		)
+	}
+	resolveGlobalLabel(index: number): string {
+		const moduleGlobalIndex = index - this.baseGlobalIndex
+		if (moduleGlobalIndex < 0) {
+			const importRef = this.importGlobals[index]
+			return ModuleContext.exportLabel(importRef.modulePrefix, 'GLOBAL', importRef.name)
+		}
+		return this.globalLabel(moduleGlobalIndex)
+	}
+	getFunctionLabel(index: number): string {
+		const moduleFunctionIndex = index - this.baseFunctionIndex
+		if (moduleFunctionIndex < 0) {
+			const importRef = this.importFunctions[index]
+			return ModuleContext.exportLabel(importRef.modulePrefix, 'FUNC', importRef.name)
+		}
+		return this.returnLabel(moduleFunctionIndex)
+	}
+	static modulePrefix(moduleIndex: number): string {
+		return `MODULE${moduleIndex}`
+	}
+	static exportLabel(modulePrefix: string, type: string, name: string): string {
+		return `${modulePrefix}_EXPORT_${type}_${name}`
+	}
+	private get modulePrefix(): string {
+		return ModuleContext.modulePrefix(this.index)
+	}
 	get initLabel(): string {
-		return `MODULE${this.index}_INIT`
+		return `${this.modulePrefix}_INIT`
 	}
 	globalLabel(index: number): string {
-		return `MODULE${this.index}_GLOBAL${index}`
+		return `${this.modulePrefix}_GLOBAL${index}`
 	}
 	functionLabel(index: number): string {
-		return `MODULE${this.index}_FUNC${index}`
+		return `${this.modulePrefix}_FUNC${index}`
 	}
 	returnLabel(index: number): string {
-		return `MODULE${this.index}_RETURN${index}`
+		return `${this.modulePrefix}_RETURN${index}`
 	}
 	exportLabel(type: string, name: string): string {
-		return `MODULE${this.index}_EXPORT_${type}_${name}`
+		return ModuleContext.exportLabel(this.modulePrefix, type, name)
 	}
 	get memorySizeLabel(): string {
-		return `MODULE${this.index}_MEMSIZE`
+		return `${this.modulePrefix}_MEMSIZE`
 	}
 	get memoryStart(): number {
 		return 0x100000000 * (this.index + 1)
@@ -124,6 +196,12 @@ class CompilationContext {
 	resolveParam(index: number): asm.Register | BPRelative {
 		return (this.generalRegisters as (asm.Register | undefined)[])[index] ||
 			new BPRelative(index - this.generalRegisters.length)
+	}
+	resolveParamDatum(index: number): asm.Datum {
+		const resolved = this.resolveParam(index)
+		return resolved instanceof BPRelative
+			? resolved.datum
+			: {type: 'register', register: resolved}
 	}
 	resolveLocal(index: number): asm.Register | BPRelative {
 		return this.resolveParam(this.params + index)
@@ -222,9 +300,9 @@ const WASM_TYPE_DIRECTIVES = new Map<ValueType, GlobalDirective>([
 	}]
 ])
 function compileInstruction(instruction: Instruction, context: CompilationContext, output: asm.AssemblyInstruction[]) {
-	output.push(new asm.Comment(
-		JSON.stringify(instruction, (_, v) => typeof v === 'bigint' ? Number(v) : v)
-	))
+	// output.push(new asm.Comment(
+	// 	JSON.stringify(instruction, (_, v) => typeof v === 'bigint' ? Number(v) : v)
+	// ))
 	switch (instruction.type) {
 		case 'unreachable':
 			// exit(0xFF)
@@ -348,6 +426,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'call': {
+			// TODO: need to know other modules' functionsStats
 			const {func} = instruction
 			// TODO: can this context be cached to avoid recomputing the context for the same function?
 			const otherContext = new CompilationContext(context.moduleContext, context.functionsStats, func)
@@ -394,7 +473,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					{type: 'register', register: 'rsp'}
 				))
 			}
-			output.push(new asm.CallInstruction(context.moduleContext.functionLabel(func)))
+			output.push(new asm.CallInstruction(context.moduleContext.getFunctionLabel(func)))
 			for (const register of reverse(toPush)) output.push(new asm.PopInstruction(register))
 			if (stackPopped) { // point to actual stack location
 				output.push(new asm.AddInstruction(
@@ -494,24 +573,21 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				}
 				else output.push(new asm.PopInstruction(value))
 			}
-			const resolvedLocal = context.resolveParam(local)
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value!},
-				resolvedLocal instanceof BPRelative
-					? resolvedLocal.datum
-					: {type: 'register', register: resolvedLocal}
+				context.resolveParamDatum(local)
 			))
 			if (tee) context.push()
 			break
 		}
 		case 'get_global': {
 			const {global} = instruction
-			const width = typeWidth(context.moduleContext.globalTypes[global])
+			const width = context.moduleContext.resolveGlobalWidth(global)
 			let target = context.resolvePush()
 			const push = !target
 			if (push) target = INTERMEDIATE_REGISTERS[0]
 			output.push(new asm.MoveInstruction(
-				{type: 'label', label: context.moduleContext.globalLabel(global)},
+				{type: 'label', label: context.moduleContext.resolveGlobalLabel(global)},
 				{type: 'register', register: target!, width}
 			))
 			if (push) output.push(new asm.PushInstruction(target!))
@@ -519,7 +595,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		}
 		case 'set_global': {
 			const {global} = instruction
-			const width = typeWidth(context.moduleContext.globalTypes[global])
+			const width = context.moduleContext.resolveGlobalWidth(global)
 			let value = context.resolvePop()
 			if (!value) {
 				value = INTERMEDIATE_REGISTERS[0]
@@ -527,7 +603,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			}
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value, width},
-				{type: 'label', label: context.moduleContext.globalLabel(global)}
+				{type: 'label', label: context.moduleContext.resolveGlobalLabel(global)}
 			))
 			break
 		}
@@ -722,6 +798,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.shr_u':
 		case 'i32.rotr':
 		case 'i32.xor':
+		case 'i64.add':
 		case 'i64.shl':
 		case 'i64.shr_u': {
 			const [type, operation] = instruction.type.split('.')
@@ -787,11 +864,24 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 	}
 }
 
-export function compileModule(module: Section[], index: number): asm.AssemblyInstruction[] {
+interface Modules {
+	module: Section[]
+	index: number
+	moduleIndices: ModuleIndices
+	moduleName: string
+}
+interface CompiledModule {
+	instructions: asm.AssemblyInstruction[]
+	declarations: HeaderDeclaration[]
+}
+
+export function compileModule(
+	{module, index, moduleIndices, moduleName}: Modules
+): CompiledModule {
 	let types: FunctionType[] | undefined
 	let functionsTypes: FunctionType[] | undefined
 	let functionsLocals: ValueType[][] | undefined
-	const moduleContext = new ModuleContext(index)
+	const moduleContext = new ModuleContext(index, moduleIndices)
 	const globalContext = new CompilationContext(
 		moduleContext,
 		new Map([[0, {params: [], locals: [], result: false}]]),
@@ -889,6 +979,7 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 		)
 	}
 	const assemblySections = [globalInstructions, initInstructions]
+	const declarations: HeaderDeclaration[] = []
 	const {segments} = codeSection
 	for (let i = 0; i < segments.length; i++) {
 		const context = new CompilationContext(moduleContext, functionsStats, i)
@@ -934,20 +1025,96 @@ export function compileModule(module: Section[], index: number): asm.AssemblyIns
 		}
 		returnInstructions.push(new asm.RetInstruction)
 		const labels: asm.AssemblyInstruction[] = []
+		const sysvInstructions: asm.AssemblyInstruction[] = []
 		for (const label of moduleContext.exportFunctions.get(i) || []) {
 			const exportLabel = moduleContext.exportLabel('FUNC', label)
 			labels.push(
 				new asm.Directive({type: 'globl', args: [exportLabel]}),
 				new asm.Label(exportLabel)
 			)
+			const sysvLabel = `wasm_${moduleName}_${label}`
+			sysvInstructions.push(
+				new asm.Directive({type: 'globl', args: [sysvLabel]}),
+				new asm.Label(sysvLabel)
+			)
+			const functionType = functionsTypes[i]
+			declarations.push(new HeaderDeclaration(
+				getCType(functionType.results[0] || 'empty'),
+				sysvLabel,
+				functionType.params.map(getCType)
+			))
 		}
-		labels.push(new asm.Label(context.moduleContext.functionLabel(i)))
+		const functionLabel = context.moduleContext.functionLabel(i)
+		labels.push(new asm.Label(functionLabel))
+		if (sysvInstructions.length) {
+			for (const register of SYSV_CALLEE_SAVE_REGISTERS) {
+				sysvInstructions.push(new asm.PushInstruction(register))
+			}
+			const {params} = context
+			const registerParams = Math.min(params, SYSV_PARAM_REGISTERS.length)
+			const targetMoves = new Map<asm.Register, asm.Datum>()
+			for (let param = 0; param < registerParams; param++) {
+				targetMoves.set(SYSV_PARAM_REGISTERS[param], context.resolveParamDatum(param))
+			}
+			let evicted: {register: asm.Register, inFirst: boolean} | undefined
+			while (targetMoves.size) {
+				let source: asm.Register, target: asm.Datum, inFirst: boolean
+				if (evicted) {
+					({inFirst} = evicted)
+					source = INTERMEDIATE_REGISTERS[Number(inFirst)]
+					const {register} = evicted
+					const maybeTarget = targetMoves.get(register)
+					if (!maybeTarget) throw new Error('Expected a parameter target')
+					target = maybeTarget
+					targetMoves.delete(register)
+				}
+				else {
+					[source, target] = targetMoves.entries().next().value
+					targetMoves.delete(source)
+					inFirst = false
+				}
+				if (target.type === 'register' && targetMoves.has(target.register)) {
+					const newEvicted = target.register
+					const newInFirst = !inFirst
+					evicted = {register: newEvicted, inFirst: newInFirst}
+					sysvInstructions.push(new asm.MoveInstruction(
+						target,
+						{type: 'register', register: INTERMEDIATE_REGISTERS[Number(newInFirst)]}
+					))
+				}
+				else evicted = undefined
+				sysvInstructions.push(
+					new asm.MoveInstruction({type: 'register', register: source}, target)
+				)
+			}
+			for (let param = registerParams; param < params; param++) {
+				const target = context.resolveParamDatum(param)
+				const register = target.type === 'register'
+					? target.register
+					: INTERMEDIATE_REGISTERS[0]
+				sysvInstructions.push(new asm.PopInstruction(register))
+				if (target.type !== 'register') {
+					sysvInstructions.push(
+						new asm.MoveInstruction({type: 'register', register}, target)
+					)
+				}
+			}
+			sysvInstructions.push(new asm.CallInstruction(functionLabel))
+			for (const register of reverse(SYSV_CALLEE_SAVE_REGISTERS)) {
+				sysvInstructions.push(new asm.PopInstruction(register))
+			}
+			sysvInstructions.push(new asm.RetInstruction)
+		}
 		assemblySections.push(
 			labels,
 			saveInstructions,
 			bodyAssembly,
-			returnInstructions
+			returnInstructions,
+			sysvInstructions
 		)
 	}
-	return flatten(assemblySections)
+	return {
+		instructions: flatten(assemblySections),
+		declarations
+	}
 }

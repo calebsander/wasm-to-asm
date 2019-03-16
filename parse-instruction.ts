@@ -12,7 +12,7 @@ import {
 } from './parse'
 import {ValueType, parseValueType} from './parse-value-type'
 
-type ResultType = 'empty' | ValueType
+export type ResultType = 'empty' | ValueType
 type Label = number
 type FunctionIndex = number
 type TypeIndex = number

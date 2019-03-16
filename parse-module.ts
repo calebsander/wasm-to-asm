@@ -30,10 +30,10 @@ interface GlobalType {
 	mutable: boolean
 }
 type ImportDescription
-	= {type: 'function', index: number}
+	= {type: 'function', typeIndex: number}
 	| {type: 'table' | 'memory', limits: Limits}
 	| {type: 'global', valueType: GlobalType}
-interface Import {
+export interface Import {
 	module: string
 	name: string
 	description: ImportDescription
@@ -168,7 +168,7 @@ const parseGlobalType = parseAndThen(
 const parseImportDescription = parseByOpcode(new Map([
 	[0x00, parseMap(
 		parseUnsigned,
-		(index): ImportDescription => ({type: 'function', index})
+		(typeIndex): ImportDescription => ({type: 'function', typeIndex})
 	)],
 	[0x01, parseMap(
 		parseTableType,
@@ -276,7 +276,7 @@ const sectionParsers = new Map<number, Parser<Section>>()
 				length
 			})
 		)
-	));
+	))
 for (const [id, parser] of [
 	[1, parseMap(
 		parseVector(parseFuncType),
@@ -339,7 +339,7 @@ for (const [id, parser] of [
 const parseSection = parseByOpcode(sectionParsers)
 const parseMagic: Parser<void> = data => {
 	if (data.getUint32(0) !== 0x0061736D) {
-		throw new Error('Invalid magic bytes');
+		throw new Error('Invalid magic bytes')
 	}
 	return {value: undefined, length: 4}
 }
