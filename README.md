@@ -71,21 +71,8 @@ MODULE0_FUNC0:
   ret
 .globl wasm_fib_fib
 wasm_fib_fib:
-  push %rbx
-  push %rbp
-  push %r12
-  push %r13
-  push %r14
-  push %r15
   mov %rdi, %rbx
-  call MODULE0_FUNC0
-  pop %r15
-  pop %r14
-  pop %r13
-  pop %r12
-  pop %rbp
-  pop %rbx
-  ret
+  jmp MODULE0_FUNC0
 ```
 ```c
 long wasm_fib_fib(int);

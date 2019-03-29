@@ -22,7 +22,7 @@ const SHIFT_REGISTER_DATUM = {type: 'register' as 'register', register: SHIFT_RE
 const SYSV_PARAM_REGISTERS: asm.Register[] =
 	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
-	['rbx', 'r12', 'r13', 'r14', 'r15']
+	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
 
 class BPRelative {
 	constructor(public readonly index: number) {}
@@ -145,9 +145,6 @@ class ModuleContext {
 	}
 	private get modulePrefix(): string {
 		return ModuleContext.modulePrefix(this.index)
-	}
-	get initLabel(): string {
-		return `${this.modulePrefix}_INIT`
 	}
 	globalLabel(index: number): string {
 		return `${this.modulePrefix}_GLOBAL${index}`
@@ -625,7 +622,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.load8_u':
 		case 'i32.load16_s':
 		case 'i32.load16_u': {
-			const {offset} = instruction.access
+			const {type, access: {offset}} = instruction
 			let register = context.resolvePop()
 			const onStack = !register
 			if (!register) {
@@ -633,24 +630,23 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				output.push(new asm.PopInstruction(register))
 			}
 			const address: asm.Datum = {type: 'register', register: INTERMEDIATE_REGISTERS[1]}
-			output.push(
-				new asm.MoveInstruction(
-					{type: 'immediate', value: context.moduleContext.memoryStart + offset},
-					address
-				),
-				new asm.AddInstruction({type: 'register', register}, address)
-			)
-			const source: asm.Datum = {...address, type: 'indirect'}
+			output.push(new asm.MoveInstruction(
+				{type: 'immediate', value: context.moduleContext.memoryStart + offset},
+				address
+			))
+			const source: asm.Datum =
+				{type: 'indirect', register: address.register, offset: {register}}
 			const targetDatum: asm.Datum = {type: 'register', register, width: 'l'}
-			const {type} = instruction
-			if (type === 'i32.load') {
-				output.push(new asm.MoveInstruction(source, targetDatum))
-			}
-			else {
-				const signed = type.endsWith('_s')
-				const width = type.startsWith('i32.load8') ? 'b' : 'w'
-				output.push(new asm.MoveExtendInstruction(source, targetDatum, width, 'l', signed))
-			}
+			output.push(type === 'i32.load'
+				? new asm.MoveInstruction(source, targetDatum)
+				: new asm.MoveExtendInstruction(
+						source,
+						targetDatum,
+						type.startsWith('i32.load8') ? 'b' : 'w',
+						'l',
+						type.endsWith('s')
+					)
+			)
 			if (onStack) output.push(new asm.PushInstruction(register))
 			context.push()
 			break
@@ -674,20 +670,17 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				output.push(new asm.PopInstruction(index))
 			}
 			const address: asm.Datum = {type: 'register', register: INTERMEDIATE_REGISTERS[2]}
-			output.push(
-				new asm.MoveInstruction(
-					{type: 'immediate', value: context.moduleContext.memoryStart + offset},
-					address
-				),
-				new asm.AddInstruction({type: 'register', register: index}, address)
-			)
+			output.push(new asm.MoveInstruction(
+				{type: 'immediate', value: context.moduleContext.memoryStart + offset},
+				address
+			))
 			const [type, operation] = instruction.type.split('.')
 			const width = operation === 'store8' ? 'b' :
 				operation === 'store16' ? 'w' :
 				operation === 'store32' || type === 'i32' ? 'l' : 'q'
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value, width},
-				{...address, type: 'indirect'}
+				{type: 'indirect', register: address.register, offset: {register: index}}
 			))
 			break
 		}
@@ -938,8 +931,7 @@ export function compileModule(
 	)
 	let codeSection: CodeSection | undefined
 	let memoriesCount = 0
-	const {initLabel} = moduleContext
-	let initInstructions: asm.AssemblyInstruction[] = [new asm.Label(initLabel)]
+	let initInstructions: asm.AssemblyInstruction[] = []
 	const dataInstructions: asm.AssemblyInstruction[] = []
 	for (const section of module) {
 		switch (section.type) {
@@ -1067,21 +1059,22 @@ export function compileModule(
 			directives.data
 		)
 	}
-	if (initInstructions.length > 1) { // not an empty function
-		initInstructions.push(new asm.RetInstruction)
+	if (initInstructions.length) { // not an empty function
+		const newInitInstructions: asm.AssemblyInstruction[] = []
 		declarations.push(new FunctionDeclaration(
 			'void',
-			addSysvLabel(moduleName, 'init', initInstructions),
+			addSysvLabel(moduleName, 'init', newInitInstructions),
 			['void']
 		))
 		for (const register of SYSV_CALLEE_SAVE_REGISTERS) {
-			initInstructions.push(new asm.PushInstruction(register))
+			newInitInstructions.push(new asm.PushInstruction(register))
 		}
-		initInstructions.push(new asm.CallInstruction(initLabel))
+		newInitInstructions.push(...initInstructions)
 		for (const register of reverse(SYSV_CALLEE_SAVE_REGISTERS)) {
-			initInstructions.push(new asm.PopInstruction(register))
+			newInitInstructions.push(new asm.PopInstruction(register))
 		}
-		initInstructions.push(new asm.RetInstruction)
+		newInitInstructions.push(new asm.RetInstruction)
+		initInstructions = newInitInstructions
 	}
 	else initInstructions = []
 	if (!(functionsTypes && functionsLocals && codeSection)) {
@@ -1114,7 +1107,7 @@ export function compileModule(
 		if (context.usesBP) {
 			const stackStart = context.resolveStack(0)
 			saveInstructions.push(new asm.EnterInstruction(
-				stackStart instanceof BPRelative ? (stackStart.index + 1) << 3 : 0
+				stackStart instanceof BPRelative ? stackStart.index << 3 : 0
 			))
 		}
 		const returnInstructions: asm.AssemblyInstruction[] = [
@@ -1162,9 +1155,6 @@ export function compileModule(
 		const functionLabel = context.moduleContext.functionLabel(i)
 		labels.push(new asm.Label(functionLabel))
 		if (sysvInstructions.length) {
-			for (const register of SYSV_CALLEE_SAVE_REGISTERS) {
-				sysvInstructions.push(new asm.PushInstruction(register))
-			}
 			const {params} = context
 			const registerParams = Math.min(params, SYSV_PARAM_REGISTERS.length)
 			const targetMoves = new Map<asm.Register, asm.Datum>()
@@ -1214,11 +1204,7 @@ export function compileModule(
 					)
 				}
 			}
-			sysvInstructions.push(new asm.CallInstruction(functionLabel))
-			for (const register of reverse(SYSV_CALLEE_SAVE_REGISTERS)) {
-				sysvInstructions.push(new asm.PopInstruction(register))
-			}
-			sysvInstructions.push(new asm.RetInstruction)
+			sysvInstructions.push(new asm.JumpInstruction(functionLabel))
 		}
 		assemblySections.push(
 			labels,

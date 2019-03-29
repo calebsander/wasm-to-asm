@@ -8,7 +8,7 @@ const X64_REGISTERS = new Set<Register>(['r8', 'r9', 'r10', 'r11', 'r12', 'r13',
 export type Width = 'b' | 'w' | 'l' | 'q'
 export interface Offset {
 	register: Register
-	scale: number
+	scale?: number
 }
 export type Datum
 	= {type: 'register', register: Register, width?: Width}
@@ -59,7 +59,11 @@ function datumToString(datum: Datum): string {
 			let result = ''
 			if (immediate) result += `${immediate}`
 			result += '(%' + register
-			if (offset) result += `, %${offset.register}, ${offset.scale}`
+			if (offset) {
+				result += ', %' + offset.register
+				const {scale} = offset
+				if (scale) result += `, ${scale}`
+			}
 			return result + ')'
 		}
 		case 'label': return `${datum.label}(%rip)`
