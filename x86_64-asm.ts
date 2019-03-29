@@ -44,7 +44,6 @@ function registerToString(register: Register, width: Width = 'q') {
 				? register + 'd'
 				: 'e' + register.slice(1)
 		case 'q':
-		case undefined:
 			return register
 	}
 }

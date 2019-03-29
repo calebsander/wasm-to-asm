@@ -25,7 +25,7 @@ interface Limits {
 	min: number
 	max?: number
 }
-interface GlobalType {
+export interface GlobalType {
 	type: ValueType
 	mutable: boolean
 }

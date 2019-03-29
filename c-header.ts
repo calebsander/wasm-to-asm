@@ -12,7 +12,25 @@ export function getCType(type: ResultType): CType {
 	}
 }
 
-export class HeaderDeclaration {
+export interface HeaderDeclaration {
+	readonly str: string
+}
+export class GlobalDeclaration {
+	constructor(
+		readonly type: CType | 'pointer',
+		readonly constant: boolean,
+		readonly name: string
+	) {}
+
+	get str() {
+		const pointer = this.type === 'pointer'
+		const constAttribute = this.constant ? 'const ' : ''
+		return pointer
+			? `void * ${constAttribute}${this.name};`
+			: `${constAttribute}${this.type} ${this.name};`
+	}
+}
+export class FunctionDeclaration {
 	constructor(
 		readonly returnType: CType,
 		readonly name: string,
