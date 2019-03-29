@@ -70,7 +70,8 @@ class ModuleContext {
 		this.globalTypes.push(...globals.map(({type}) => type))
 	}
 	addExports(exports: Export[]): void {
-		for (const {name, description: {type, index}} of exports) {
+		for (let {name, description: {type, index}} of exports) {
+			name = name.replace(/-/g, '_')
 			let exportMap: Map<Number, string[]>
 			switch (type) {
 				case 'memory':
@@ -281,6 +282,8 @@ const PROT_READ_WRITE: asm.Datum = {type: 'immediate', value: 0x1 | 0x2}
 // MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS
 const MMAP_FLAGS: asm.Datum = {type: 'immediate', value: 0x01 | 0x10 | 0x20}
 const compareOperations = new Map<string, asm.JumpCond>([
+	['eq', 'e'],
+	['lt_s', 'l'],
 	['lt_u', 'b'],
 	['gt_s', 'g']
 ])
@@ -373,7 +376,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				new asm.TestInstruction(datum, datum),
 				new asm.JumpInstruction(hasElse ? elseLabel! : endLabel, 'e')
 			)
-			for (const instruction of ifInstructions) compileInstruction(instruction, context, output)
+			compileInstructions(ifInstructions, context, output)
 			if (hasElse) {
 				containingLabels.pop()
 				containingLabels.push({
@@ -383,9 +386,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				})
 				output.push(
 					new asm.JumpInstruction(endLabel),
-					new asm.Label(elseLabel)
+					new asm.Label(elseLabel!)
 				)
-				for (const instruction of elseInstructions) compileInstruction(instruction, context, output)
+				if (instruction.returns !== 'empty') context.pop()
+				compileInstructions(elseInstructions, context, output)
 			}
 			output.push(new asm.Label(endLabel))
 			containingLabels.pop()
@@ -777,7 +781,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'i32.lt_u':
-		case 'i32.gt_s': {
+		case 'i32.gt_s':
+		case 'i64.eq':
+		case 'i64.lt_s':
+		case 'i64.gt_s': {
 			let arg2 = context.resolvePop()
 			if (!arg2) {
 				arg2 = INTERMEDIATE_REGISTERS[0]
@@ -798,7 +805,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			output.push(
 				new asm.CmpInstruction({type: 'register', register: arg2, width}, datum1),
 				new asm.SetInstruction(datum1Byte, cond),
-				new asm.MoveExtendInstruction(datum1Byte, datum1, 'b', 'l', false)
+				new asm.MoveExtendInstruction(datum1Byte, {...datum1, width: 'l'}, 'b', 'l', false)
 			)
 			context.push()
 			if (onStack) output.push(new asm.PushInstruction(arg1!))
@@ -808,11 +815,12 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.sub':
 		case 'i32.and':
 		case 'i32.or':
+		case 'i32.xor':
 		case 'i32.shl':
 		case 'i32.shr_u':
 		case 'i32.rotr':
-		case 'i32.xor':
 		case 'i64.add':
+		case 'i64.sub':
 		case 'i64.shl':
 		case 'i64.shr_u': {
 			let operand2 = context.resolvePop()
@@ -870,6 +878,34 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					SHIFT_REGISTER_DATUM
 				))
 			}
+			break
+		}
+		case 'i32.mul':
+		case 'i64.mul': {
+			let operand2 = context.resolvePop()
+			const operand1 = context.resolvePop()
+			const width = instruction.type === 'i32.mul' ? 'l' : 'q'
+			if (operand1) {
+				output.push(new asm.ImulInstruction(
+					operand2
+						? {type: 'register', register: operand2, width}
+						: {type: 'indirect', register: 'rsp'},
+					{type: 'register', register: operand1, width}
+				))
+			}
+			else {
+				if (!operand2) {
+					[operand2] = INTERMEDIATE_REGISTERS
+					output.push(new asm.PopInstruction(operand2))
+				}
+				const datum2: asm.Datum = {type: 'register', register: operand2, width},
+				      stack: asm.Datum = {type: 'indirect', register: 'rsp'}
+				output.push(
+					new asm.ImulInstruction(stack, datum2),
+					new asm.MoveInstruction(datum2, stack)
+				)
+			}
+			context.push()
 			break
 		}
 		case 'i32.wrap': {

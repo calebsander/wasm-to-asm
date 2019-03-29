@@ -150,6 +150,9 @@ export class MoveExtendInstruction extends SrcDestInstruction {
 		return `mov${this.signed ? 's' : 'z'}${this.srcWidth}${this.destWidth}`
 	}
 }
+export class ImulInstruction extends SrcDestInstruction {
+	get op() { return 'imul' }
+}
 export class OrInstruction extends SrcDestInstruction {
 	get op() { return 'or' }
 }
