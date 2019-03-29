@@ -18,10 +18,11 @@ const GENERAL_REGISTERS: asm.Register[] = [
 	'rbp'
 ]
 const SHIFT_REGISTER: asm.Register = 'rcx'
+const SHIFT_REGISTER_DATUM = {type: 'register' as 'register', register: SHIFT_REGISTER}
 const SYSV_PARAM_REGISTERS: asm.Register[] =
 	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
-	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
+	['rbx', 'r12', 'r13', 'r14', 'r15']
 
 class BPRelative {
 	constructor(public readonly index: number) {}
@@ -134,7 +135,7 @@ class ModuleContext {
 			const importRef = this.importFunctions[index]
 			return ModuleContext.exportLabel(importRef.modulePrefix, 'FUNC', importRef.name)
 		}
-		return this.returnLabel(moduleFunctionIndex)
+		return this.functionLabel(moduleFunctionIndex)
 	}
 	static modulePrefix(moduleIndex: number): string {
 		return `MODULE${moduleIndex}`
@@ -227,8 +228,8 @@ class CompilationContext {
 		return resolvedIndex instanceof BPRelative ? undefined : resolvedIndex
 	}
 	resolvePop(): asm.Register | undefined {
-		const resolvedIndex = this.resolveStack(this.stackHeight - 1)
 		this.pop()
+		const resolvedIndex = this.resolveStack(this.stackHeight)
 		return resolvedIndex instanceof BPRelative ? undefined : resolvedIndex
 	}
 	// If wholeFunction is true, maxStackHeight is used and params are excluded
@@ -428,7 +429,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			}
 			if (popCount) {
 				output.push(new asm.AddInstruction(
-					{type: 'immediate', value: popCount},
+					{type: 'immediate', value: popCount << 3},
 					{type: 'register', register: 'rsp'}
 				))
 			}
@@ -802,7 +803,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const datum1: asm.Datum = {type: 'register', register: arg1!, width}
 			const datum1Byte: asm.Datum = {...datum1, width: 'b'}
 			output.push(
-				new asm.CmpInstruction(datum1, {type: 'register', register: arg2, width}),
+				new asm.CmpInstruction({type: 'register', register: arg2, width}, datum1),
 				new asm.SetInstruction(datum1Byte, cond),
 				new asm.MoveExtendInstruction(datum1Byte, datum1, 'b', 'l', false)
 			)
@@ -821,43 +822,59 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.add':
 		case 'i64.shl':
 		case 'i64.shr_u': {
+			let operand2 = context.resolvePop()
+			if (!operand2) {
+				[operand2] = INTERMEDIATE_REGISTERS
+				output.push(new asm.PopInstruction(operand2))
+			}
 			const [type, operation] = instruction.type.split('.')
+			/*
+				Shifts are tricky because the second operand MUST be stored in %cl.
+				If the second operand is already in %rcx, this is fine.
+				Otherwise, evict %rcx to an intermediate register and restore it after the shift.
+				If %rcx had the first operand, the shift needs to go against the intermediate register.
+			*/
 			const shift = SHIFT_OPERATIONS.has(operation)
-			const saveShiftRegister = shift && context.registersUsed().includes(SHIFT_REGISTER)
-				? INTERMEDIATE_REGISTERS[2]
+			const shiftRelocate = shift && operand2 !== SHIFT_REGISTER
+			const saveShiftRegister = shiftRelocate && context.registersUsed().includes(SHIFT_REGISTER)
+				? INTERMEDIATE_REGISTERS[1]
 				: undefined
 			if (saveShiftRegister) {
 				output.push(new asm.MoveInstruction(
-					{type: 'register', register: SHIFT_REGISTER},
+					SHIFT_REGISTER_DATUM,
 					{type: 'register', register: saveShiftRegister}
 				))
 			}
-			let operand2 = context.resolvePop()
-			if (!operand2) {
-				operand2 = INTERMEDIATE_REGISTERS[0]
-				output.push(new asm.PopInstruction(operand2))
-			}
 			let operand1 = context.resolvePop()
-			const pushResult = !operand1
-			if (pushResult) {
-				operand1 = INTERMEDIATE_REGISTERS[1]
-				output.push(new asm.PopInstruction(operand1))
+			if (saveShiftRegister && operand1 === SHIFT_REGISTER) {
+				operand1 = saveShiftRegister
 			}
 			const arithmeticInstruction = arithmeticOperations.get(operation)
 			if (!arithmeticInstruction) throw new Error(`No arithmetic instruction found for ${instruction.type}`)
 			const width = typeWidth(type as ValueType)
+			let datum2: asm.Datum
+			if (shift) {
+				if (shiftRelocate) {
+					output.push(new asm.MoveInstruction(
+						{type: 'register', register: operand2},
+						SHIFT_REGISTER_DATUM
+					))
+				}
+				datum2 = {...SHIFT_REGISTER_DATUM, width: 'b'}
+			}
+			else datum2 = {type: 'register', register: operand2, width}
 			output.push(new arithmeticInstruction(
-				shift
-					? {type: 'register', register: SHIFT_REGISTER, width: 'b'}
-					: {type: 'register', register: operand2, width},
-				{type: 'register', register: operand1!, width}
+				datum2,
+				operand1
+					? {type: 'register', register: operand1, width}
+					: {type: 'indirect', register: 'rsp'},
+				width
 			))
 			context.push()
-			if (pushResult) output.push(new asm.PushInstruction(operand1!))
 			if (saveShiftRegister) {
 				output.push(new asm.MoveInstruction(
 					{type: 'register', register: saveShiftRegister},
-					{type: 'register', register: SHIFT_REGISTER}
+					SHIFT_REGISTER_DATUM
 				))
 			}
 			break
@@ -1088,19 +1105,16 @@ export function compileModule(
 	for (let i = 0; i < segments.length; i++) {
 		const context = new CompilationContext(moduleContext, functionsStats, i)
 		const bodyAssembly: asm.AssemblyInstruction[] = []
-		const {instructions} = segments[i]
-		for (const instruction of instructions) {
-			compileInstruction(instruction, context, bodyAssembly)
-		}
+		compileInstructions(segments[i].instructions, context, bodyAssembly)
 		const registersUsed = context.registersUsed(true)
 		const saveInstructions: asm.AssemblyInstruction[] = []
 		for (const register of registersUsed) {
 			saveInstructions.push(new asm.PushInstruction(register))
 		}
 		if (context.usesBP) {
-			saveInstructions.push(new asm.MoveInstruction(
-				{type: 'register', register: 'rsp'},
-				{type: 'register', register: 'rbp'}
+			const stackStart = context.resolveStack(0)
+			saveInstructions.push(new asm.EnterInstruction(
+				stackStart instanceof BPRelative ? (stackStart.index + 1) << 3 : 0
 			))
 		}
 		const returnInstructions: asm.AssemblyInstruction[] = [
@@ -1124,6 +1138,7 @@ export function compileModule(
 				{type: 'register', register: 'rsp'}
 			))
 		}
+		if (context.usesBP) returnInstructions.push(new asm.LeaveInstruction)
 		for (const register of reverse(registersUsed)) {
 			returnInstructions.push(new asm.PopInstruction(register))
 		}

@@ -72,10 +72,10 @@ export interface AssemblyInstruction {
 }
 
 abstract class SrcDestInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum) {}
+	constructor(readonly src: Datum, readonly dest: Datum, readonly width?: Width) {}
 	abstract readonly op: string
 	get str() {
-		return `${this.op} ${datumToString(this.src)}, ${datumToString(this.dest)}`
+		return `${this.op}${this.width || ''} ${datumToString(this.src)}, ${datumToString(this.dest)}`
 	}
 }
 abstract class FullRegisterInstruction {
@@ -118,9 +118,16 @@ export class CMoveInstruction extends SrcDestInstruction {
 export class CmpInstruction extends SrcDestInstruction {
 	get op() { return 'cmp' }
 }
+export class EnterInstruction {
+	constructor(readonly frameSize: number) {}
+	get str() { return `enter $${this.frameSize}, $0` }
+}
 export class JumpInstruction {
 	constructor(readonly target: string, readonly cond?: JumpCond) {}
 	get str() { return `j${this.cond || 'mp'} ${this.target}` }
+}
+export class LeaveInstruction {
+	get str() { return 'leave' }
 }
 export class MoveInstruction extends SrcDestInstruction {
 	get op() { return 'mov' }
