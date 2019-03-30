@@ -136,8 +136,7 @@ Pretty nifty!
 
 There are several features that aren't supported yet:
 - `f32` and `f64` values
-- Many int and float instructions
-- Growable memory in WebAssembly modules and an interface to access it from C
+- Some int and float instructions
 - Linking multiple WebAssembly modules to each other
 - `start` functions in modules
 
