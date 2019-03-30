@@ -37,64 +37,60 @@ node main fib.wasm
 This creates a `fib.s` assembly file and a `fib.h` C header file:
 ```asm
 MODULE0_FUNC0:
-  push %rcx
-  push %rdx
+  push %rsi
   push %r8
   push %r9
+  push %r10
   # {"type":"i64.const","value":"1"}
-  mov $1, %r8
+  mov $1, %r9
   # {"type":"set_local","local":1}
-  mov %r8, %rcx
+  mov %r9, %rsi
   # {"type":"i64.const","value":"0"}
-  mov $0, %r8
+  mov $0, %r9
   # {"type":"set_local","local":2}
-  mov %r8, %rdx
+  mov %r9, %r8
   # {"type":"loop","returns":"empty","instructions":[...]}
   MODULE0_FUNC0_LOOP1:
   # {"type":"get_local","local":0}
-  mov %rbx, %r8
+  mov %rdi, %r9
   # {"type":"if","returns":"empty","ifInstructions":[...],"elseInstructions":[]}
-  test %r8d, %r8d
+  test %r9d, %r9d
   je MODULE0_FUNC0_IF_END2
   # {"type":"get_local","local":1}
-  mov %rcx, %r8
+  mov %rsi, %r9
   # {"type":"get_local","local":2}
-  mov %rdx, %r9
+  mov %r8, %r10
   # {"type":"i64.add"}
-  add %r9, %r8
+  addq %r10, %r9
   # {"type":"get_local","local":2}
-  mov %rdx, %r9
+  mov %r8, %r10
   # {"type":"set_local","local":1}
-  mov %r9, %rcx
+  mov %r10, %rsi
   # {"type":"set_local","local":2}
-  mov %r8, %rdx
+  mov %r9, %r8
   # {"type":"get_local","local":0}
-  mov %rbx, %r8
+  mov %rdi, %r9
   # {"type":"i32.const","value":1}
-  mov $1, %r9d
+  mov $1, %r10d
   # {"type":"i32.sub"}
-  sub %r9d, %r8d
+  subl %r10d, %r9d
   # {"type":"set_local","local":0}
-  mov %r8, %rbx
+  mov %r9, %rdi
   # {"type":"br","label":1}
   jmp MODULE0_FUNC0_LOOP1
   MODULE0_FUNC0_IF_END2:
   # {"type":"get_local","local":2}
-  mov %rdx, %r8
+  mov %r8, %r9
   MODULE0_RETURN0:
-  mov %r8, %rax
+  mov %r9, %rax
+  pop %r10
   pop %r9
   pop %r8
-  pop %rdx
-  pop %rcx
+  pop %rsi
   ret
 .globl wasm_fib_fib
 wasm_fib_fib:
-  push %rbx
-  mov %rdi, %rbx
-  call MODULE0_FUNC0
-  pop %rbx
-  ret
+  jmp MODULE0_FUNC0
 ```
 ```c
 long wasm_fib_fib(int);
@@ -146,8 +142,9 @@ The calling convention is similar to SysV ABI but doesn't have any caller-save r
 
 ### Use of registers
 
-`rdi`, `rsi`, and `rax` are used to store intermediate values, e.g. when moving values between locations in memory and for the `select` instruction.
-The rest of the general-purpose registers (`rbx`, `rcx`, `rdx`, `r8` to `r15`, and `rbp`) are used to store local variables and the bottom of the computation stack.
+`rax`, `rcx`, and `rdx` are used to store intermediate values, e.g. when moving values between locations in memory and for the `select` instruction.
+(These registers were chosen because bitshift instructions (`shl`, `ror`, etc.) and division instructions (`div` and `idiv`) require an operand to be stored in them.)
+The rest of the general-purpose registers (`rdi`, `rsi`, `r8` to `r15`, `rbx`, and `rbp`) are used to store local variables and the bottom of the computation stack.
 If the local variables or computation stack overflow the registers, the rest are stored on the stack and `rbp` is used as a base pointer instead of a general-purpose register.
 This means that functions with few locals can have most of their computations performed on registers instead of the stack.
 

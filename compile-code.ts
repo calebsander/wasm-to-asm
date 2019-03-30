@@ -9,16 +9,17 @@ function* reverse<A>(arr: A[]) {
 }
 const flatten = <A>(sections: A[][]) => ([] as A[]).concat(...sections)
 
-const INTERMEDIATE_REGISTERS: asm.Register[] = ['rdi', 'rsi', 'rax']
+const INTERMEDIATE_REGISTERS: asm.Register[] = ['rax', 'rcx', 'rdx']
 const RESULT_REGISTER: asm.Register = 'rax'
 const BASE_POINTER_REGISTER: asm.Register = 'rbp'
 const GENERAL_REGISTERS: asm.Register[] = [
-	'rbx', 'rcx', 'rdx',
+	'rdi', 'rsi',
 	'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15',
-	'rbp'
+	'rbx', 'rbp'
 ]
 const SHIFT_REGISTER: asm.Register = 'rcx'
-const SHIFT_REGISTER_DATUM = {type: 'register' as const, register: SHIFT_REGISTER}
+const SHIFT_REGISTER_DATUM: asm.Datum = {type: 'register', register: SHIFT_REGISTER}
+const SHIFT_REGISTER_BYTE: asm.Datum = {...SHIFT_REGISTER_DATUM, width: 'b'}
 const DIV_LOWER_REGISTER: asm.Register = 'rax'
 const DIV_LOWER_DATUM = {type: 'register' as const, register: DIV_LOWER_REGISTER}
 const DIV_UPPER_REGISTER: asm.Register = 'rdx'
@@ -292,8 +293,19 @@ function unwindStack(stackHeight: number, context: CompilationContext, output: a
 	}
 }
 
-const MMAP_SYSCALL_REGISTERS = new Array<asm.Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
-	.filter(register => !GENERAL_REGISTERS.includes(register))
+const MMAP_SYSCALL_REGISTERS =
+	new Array<asm.Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
+	.filter(register => GENERAL_REGISTERS.includes(register))
+const MMAP_SYSCALL_REGISTER_SET = new Set(MMAP_SYSCALL_REGISTERS)
+const SYSCALL_DATUM: asm.Datum = {type: 'register', register: 'rax'},
+	MMAP_ADDR_DATUM = {type: 'register' as const, register: 'rdi' as const},
+	MMAP_ADDR_INTERMEDIATE: asm.Datum =
+		{type: 'register', register: INTERMEDIATE_REGISTERS[2]},
+	MMAP_LENGTH_DATUM: asm.Datum = {type: 'register', register: 'rsi'},
+	MMAP_PROT_DATUM: asm.Datum = {type: 'register', register: 'rdx'},
+	MMAP_FLAGS_DATUM: asm.Datum = {type: 'register', register: 'r10'},
+	MMAP_FD_DATUM: asm.Datum = {type: 'register', register: 'r8'},
+	MMAP_OFFSET_DATUM: asm.Datum = {type: 'register', register: 'r9'}
 const PAGE_BITS: asm.Datum = {type: 'immediate', value: 16}
 // PROT_READ | PROT_WRITE
 const PROT_READ_WRITE: asm.Datum = {type: 'immediate', value: 0x1 | 0x2}
@@ -732,11 +744,17 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'memory.grow': {
-			const pagesAddRegister = 'rsi'
 			let pages = context.resolvePop()
-			if (!pages) {
-				pages = pagesAddRegister
-				output.push(new asm.PopInstruction(pages))
+			if (!pages || MMAP_SYSCALL_REGISTER_SET.has(pages)) {
+				const newPages = INTERMEDIATE_REGISTERS[1]
+				output.push(pages
+					? new asm.MoveInstruction(
+							{type: 'register', register: pages},
+							{type: 'register', register: newPages}
+						)
+					: new asm.PopInstruction(newPages)
+				)
+				pages = newPages
 			}
 			const registersUsed = new Set(context.registersUsed())
 			const toRestore: asm.Register[] = []
@@ -747,48 +765,35 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				}
 			}
 			const sizeLabel: asm.Datum = {type: 'label', label: context.moduleContext.memorySizeLabel}
-			const addrDatum: asm.Datum = {type: 'register', register: 'rdi'}
-			const addrDatum32: asm.Datum = {...addrDatum, width: 'l'}
 			output.push(
+				new asm.PushInstruction(pages), // save the number of pages added
 				new asm.MoveInstruction(
 					{type: 'immediate', value: asm.SYSCALL.mmap},
-					{type: 'register', register: 'rax'}
+					SYSCALL_DATUM
 				),
-				new asm.MoveInstruction(sizeLabel, addrDatum32),
-				new asm.ShlInstruction(PAGE_BITS, addrDatum),
+				new asm.MoveInstruction(sizeLabel, {...MMAP_ADDR_DATUM, width: 'l'}),
+				new asm.ShlInstruction(PAGE_BITS, MMAP_ADDR_DATUM),
 				new asm.MoveInstruction( // must mov 64-bit immediate to intermediate register
 					{type: 'immediate', value: context.moduleContext.memoryStart},
-					{type: 'register', register: 'rsi'}
+					MMAP_ADDR_INTERMEDIATE
 				),
-				new asm.AddInstruction({type: 'register', register: 'rsi'}, addrDatum)
-			)
-			if (pages !== pagesAddRegister) {
-				output.push(new asm.MoveInstruction(
-					{type: 'register', register: pages},
-					{type: 'register', register: pagesAddRegister}
-				))
-			}
-			const offset: asm.Datum = {type: 'register', register: 'r9'}
-			output.push(
-				new asm.PushInstruction(pagesAddRegister), // save the number of pages added
-				new asm.ShlInstruction(PAGE_BITS, {type: 'register', register: 'rsi'}),
-				new asm.MoveInstruction(PROT_READ_WRITE, {type: 'register', register: 'rdx'}),
-				new asm.MoveInstruction(MMAP_FLAGS, {type: 'register', register: 'r10'}),
-				new asm.MoveInstruction(
-					{type: 'immediate', value: -1},
-					{type: 'register', register: 'r8'}
-				),
-				new asm.XorInstruction(offset, offset),
+				new asm.AddInstruction(MMAP_ADDR_INTERMEDIATE, MMAP_ADDR_DATUM),
+				new asm.MoveInstruction({type: 'register', register: pages}, MMAP_LENGTH_DATUM),
+				new asm.ShlInstruction(PAGE_BITS, MMAP_LENGTH_DATUM),
+				new asm.MoveInstruction(PROT_READ_WRITE, MMAP_PROT_DATUM),
+				new asm.MoveInstruction(MMAP_FLAGS, MMAP_FLAGS_DATUM),
+				new asm.MoveInstruction({type: 'immediate', value: -1}, MMAP_FD_DATUM),
+				new asm.XorInstruction(MMAP_OFFSET_DATUM, MMAP_OFFSET_DATUM),
 				new asm.SysCallInstruction,
-				new asm.PopInstruction(pagesAddRegister)
+				new asm.PopInstruction(pages)
 			)
 			for (const register of reverse(toRestore)) output.push(new asm.PopInstruction(register))
 			let target = context.resolvePush()
 			const push = !target
-			if (push) target = INTERMEDIATE_REGISTERS[0]
+			if (push) [target] = INTERMEDIATE_REGISTERS
 			output.push(
 				new asm.MoveInstruction(sizeLabel, {type: 'register', register: target!, width: 'l'}),
-				new asm.AddInstruction({type: 'register', register: pagesAddRegister, width: 'l'}, sizeLabel)
+				new asm.AddInstruction({type: 'register', register: pages, width: 'l'}, sizeLabel)
 			)
 			if (push) output.push(new asm.PushInstruction(target!))
 			// TODO: handle mmap failure (return -1)
@@ -914,45 +919,23 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.rotr': {
 			let operand2 = context.resolvePop()
 			if (!operand2) {
-				[operand2] = INTERMEDIATE_REGISTERS
+				operand2 = INTERMEDIATE_REGISTERS[1]
 				output.push(new asm.PopInstruction(operand2))
 			}
+			const operand1 = context.resolvePop()
 			const [type, operation] = instruction.type.split('.')
-			/*
-				Shifts are tricky because the second operand MUST be stored in %cl.
-				If the second operand is already in %rcx, this is fine.
-				Otherwise, evict %rcx to an intermediate register and restore it after the shift.
-				If %rcx had the first operand, the shift needs to go against the intermediate register.
-			*/
 			const shift = SHIFT_OPERATIONS.has(operation)
-			const shiftRelocate = shift && operand2 !== SHIFT_REGISTER
-			const saveShiftRegister = shiftRelocate && context.registersUsed().includes(SHIFT_REGISTER)
-				? INTERMEDIATE_REGISTERS[1]
-				: undefined
-			if (saveShiftRegister) {
-				output.push(new asm.MoveInstruction(
-					SHIFT_REGISTER_DATUM,
-					{type: 'register', register: saveShiftRegister}
-				))
-			}
-			let operand1 = context.resolvePop()
-			if (saveShiftRegister && operand1 === SHIFT_REGISTER) {
-				operand1 = saveShiftRegister
-			}
 			const arithmeticInstruction = arithmeticOperations.get(operation)
-			if (!arithmeticInstruction) throw new Error(`No arithmetic instruction found for ${instruction.type}`)
+			if (!arithmeticInstruction) throw new Error('No arithmetic instruction found for ' + instruction.type)
 			const width = typeWidth(type as ValueType)
-			let datum2: asm.Datum
+			let datum2: asm.Datum = {type: 'register', register: operand2}
 			if (shift) {
-				if (shiftRelocate) {
-					output.push(new asm.MoveInstruction(
-						{type: 'register', register: operand2},
-						SHIFT_REGISTER_DATUM
-					))
+				if (operand2 !== SHIFT_REGISTER) {
+					output.push(new asm.MoveInstruction(datum2, SHIFT_REGISTER_DATUM))
 				}
-				datum2 = {...SHIFT_REGISTER_DATUM, width: 'b'}
+				datum2 = SHIFT_REGISTER_BYTE
 			}
-			else datum2 = {type: 'register', register: operand2, width}
+			else datum2.width = width
 			output.push(new arithmeticInstruction(
 				datum2,
 				operand1
@@ -961,12 +944,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				width
 			))
 			context.push()
-			if (saveShiftRegister) {
-				output.push(new asm.MoveInstruction(
-					{type: 'register', register: saveShiftRegister},
-					SHIFT_REGISTER_DATUM
-				))
-			}
 			break
 		}
 		case 'i32.mul':
@@ -1010,22 +987,13 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const datum1: asm.Datum = operand1
 				? {type: 'register', register: operand1}
 				: {type: 'indirect', register: 'rsp', immediate: 1 << 3}
-			let upperEvictRegister: asm.Register | undefined
-			let upperEvictDatum: asm.Datum | undefined
-			const divisorEvicted = operand2 === DIV_UPPER_REGISTER
-			if (divisorEvicted || context.registersUsed().includes(DIV_UPPER_REGISTER)) {
-				[upperEvictRegister] = INTERMEDIATE_REGISTERS
-				upperEvictDatum = {type: 'register', register: upperEvictRegister}
-				output.push(new asm.MoveInstruction(DIV_UPPER_DATUM, upperEvictDatum))
-			}
 			const [type, operation] = instruction.type.split('.')
 			const [op, signedness] = operation.split('_')
 			const i32 = type === 'i32'
 			const width = i32 ? 'l' : 'q'
 			const signed = signedness === 's'
-			const datum2: asm.Datum =
-				divisorEvicted ? {type: 'register', register: upperEvictRegister!, width} :
-				operand2 ? {type: 'register', register: operand2, width}
+			const datum2: asm.Datum = operand2
+				? {type: 'register', register: operand2, width}
 				: {type: 'indirect', register: 'rsp'}
 			if (op === 'rem' && signed) {
 				// Special case for INT_MIN % -1, since the remainder
@@ -1053,9 +1021,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				output.push(new asm.MoveInstruction(result, datum1))
 			}
 			context.resolvePush()
-			if (upperEvictDatum) {
-				output.push(new asm.MoveInstruction(upperEvictDatum, DIV_UPPER_DATUM))
-			}
 			break
 		}
 		case 'i32.wrap': {
@@ -1398,9 +1363,11 @@ export function compileModule(
 						sysvInstructions.push(new asm.PushInstruction(register))
 					}
 				}
-				sysvInstructions.push(
-					new asm.MoveInstruction({type: 'register', register: source}, target)
-				)
+				if (target.type !== 'register' || target.register !== source) {
+					sysvInstructions.push(
+						new asm.MoveInstruction({type: 'register', register: source}, target)
+					)
+				}
 			}
 			for (let param = registerParams; param < params; param++) {
 				const target = context.resolveParamDatum(param)
@@ -1416,8 +1383,8 @@ export function compileModule(
 			}
 			if (toRestore.length) {
 				sysvInstructions.push(new asm.CallInstruction(functionLabel))
-				while (toRestore.length) {
-					sysvInstructions.push(new asm.PopInstruction(toRestore.pop()!))
+				for (const register of reverse(toRestore)) {
+					sysvInstructions.push(new asm.PopInstruction(register))
 				}
 				sysvInstructions.push(new asm.RetInstruction)
 			}
