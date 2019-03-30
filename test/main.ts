@@ -32,7 +32,7 @@ async function fibTest() {
 		console.error(e)
 		return {test}
 	}
-	try { await execFile(__dirname + '/../main.js', [wasmFile]) }
+	try { await execFile('node', [__dirname + '/../main.js', wasmFile]) }
 	catch (e) {
 		console.error(e)
 		return {test}
@@ -62,7 +62,7 @@ async function sha256Test() {
 		console.error(e)
 		return {test}
 	}
-	try { await execFile(__dirname + '/../main.js', [wasmFile]) }
+	try { await execFile('node', [__dirname + '/../main.js', wasmFile]) }
 	catch (e) {
 		console.error(e)
 		return {test}
@@ -115,7 +115,7 @@ function getValue({op, args}: SExpression) {
 				console.error(e)
 				return {test}
 			}
-			try { await execFile(__dirname + '/../main.js', [wasmPath]) }
+			try { await execFile('node', [__dirname + '/../main.js', wasmPath]) }
 			catch (e) {
 				console.error(e)
 				return {test}

@@ -2,7 +2,7 @@
 	"name": "wasm-to-asm",
 	"version": "1.0.0",
 	"description": "Combile WASM to x86_64",
-	"main": "index.js",
+	"main": "main.js",
 	"scripts": {
 		"build": "tsc",
 		"wabt": "bash -c '[[ -d test/wabt ]]' || (git clone --depth 1 https://github.com/WebAssembly/wabt test/wabt && cd test/wabt && make gcc-release-no-tests)",
