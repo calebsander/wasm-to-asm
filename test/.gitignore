@@ -1,2 +1,7 @@
 spec
 wabt
+
+sha256.h
+sha256.s
+sha256.wasm
+sha256-test

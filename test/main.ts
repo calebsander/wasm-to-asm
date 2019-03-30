@@ -20,6 +20,39 @@ const execFile = promisify(childProcess.execFile),
       readFile = promisify(fs.readFile),
       writeFile = promisify(fs.writeFile)
 
+async function sha256Test() {
+	const test = 'sha256'
+	const baseFile = `${__dirname}/${test}`
+	const wasmFile = baseFile + '.wasm'
+	try {
+		await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
+	}
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+	try { await execFile(__dirname + '/../main.js', [wasmFile]) }
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+	const runPath = baseFile + '-test'
+	try {
+		await execFile(CC, [baseFile + '.s', runPath + '.c', '-o', runPath, '-lcrypto'])
+	}
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+	try { await execFile(runPath) }
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+
+	return {test, testCount: 1}
+}
+
 function getValue({op, args}: SExpression) {
 	switch (op) {
 		case 'i32.const':
@@ -49,12 +82,12 @@ function getValue({op, args}: SExpression) {
 			}
 			catch (e) {
 				console.error(e)
-				return
+				return {test}
 			}
 			try { await execFile(__dirname + '/../main.js', [wasmPath]) }
 			catch (e) {
 				console.error(e)
-				return
+				return {test}
 			}
 
 			let cFile = `
@@ -109,31 +142,30 @@ function getValue({op, args}: SExpression) {
 			      cFilePath = sFilePath.replace('.s', '-test.c'),
 			      runPath = cFilePath.replace('.c', '')
 			await writeFile(cFilePath, cFile)
-			try { await execFile(CC, ['-g', sFilePath, cFilePath, '-o', runPath]) }
+			try { await execFile(CC, [sFilePath, cFilePath, '-o', runPath]) }
 			catch (e) {
 				console.error(e)
-				return
+				return {test}
 			}
 
 			try { await execFile(runPath) }
 			catch (e) {
 				console.error(e)
-				return
+				return {test}
 			}
 		}
-		return {testCount}
-	}))
+		return {test, testCount}
+	}).concat([sha256Test()]))
 
 	let passes = 0
-	TESTS.forEach((test, i) => {
-		const result = results[i]
-		if (result) {
-			const {testCount} = result
+	for (const {test, testCount} of results) {
+		if (testCount) {
 			console.log(test, `PASS ${testCount} test${testCount === 1 ? '' : 's'}`)
 			passes++
 		}
 		else console.log(test, 'FAIL')
-	})
-	console.log(`${passes} of ${TESTS.length} tests passed (${Math.floor(passes / TESTS.length * 100)}%)`)
-	process.exit(TESTS.length - passes)
+	}
+	const testsCount = results.length
+	console.log(`${passes} of ${testsCount} tests passed (${Math.floor(passes / testsCount * 100)}%)`)
+	process.exit(testsCount - passes)
 })()

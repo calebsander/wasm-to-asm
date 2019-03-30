@@ -1363,6 +1363,7 @@ export function compileModule(
 				targetMoves.set(SYSV_PARAM_REGISTERS[param], context.resolveParamDatum(param))
 			}
 			let evicted: {register: asm.Register, inFirst: boolean} | undefined
+			const toRestore: asm.Register[] = []
 			while (targetMoves.size) {
 				let source: asm.Register, target: asm.Datum, inFirst: boolean
 				if (evicted) {
@@ -1389,6 +1390,13 @@ export function compileModule(
 					))
 				}
 				else evicted = undefined
+				if (target.type === 'register') {
+					const {register} = target
+					if (SYSV_CALLEE_SAVE_REGISTERS.includes(register)) {
+						toRestore.push(register)
+						sysvInstructions.push(new asm.PushInstruction(register))
+					}
+				}
 				sysvInstructions.push(
 					new asm.MoveInstruction({type: 'register', register: source}, target)
 				)
@@ -1405,7 +1413,14 @@ export function compileModule(
 					)
 				}
 			}
-			sysvInstructions.push(new asm.JumpInstruction(functionLabel))
+			if (toRestore.length) {
+				sysvInstructions.push(new asm.CallInstruction(functionLabel))
+				while (toRestore.length) {
+					sysvInstructions.push(new asm.PopInstruction(toRestore.pop()!))
+				}
+				sysvInstructions.push(new asm.RetInstruction)
+			}
+			else sysvInstructions.push(new asm.JumpInstruction(functionLabel))
 		}
 		assemblySections.push(
 			labels,
