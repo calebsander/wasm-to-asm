@@ -1,6 +1,11 @@
 spec
 wabt
 
+fib.h
+fib.s
+fib.wasm
+fib-test
+
 sha256.h
 sha256.s
 sha256.wasm

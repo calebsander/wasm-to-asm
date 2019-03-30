@@ -41,26 +41,45 @@ MODULE0_FUNC0:
   push %rdx
   push %r8
   push %r9
+  # {"type":"i64.const","value":"1"}
   mov $1, %r8
+  # {"type":"set_local","local":1}
   mov %r8, %rcx
+  # {"type":"i64.const","value":"0"}
   mov $0, %r8
+  # {"type":"set_local","local":2}
   mov %r8, %rdx
+  # {"type":"loop","returns":"empty","instructions":[...]}
   MODULE0_FUNC0_LOOP1:
+  # {"type":"get_local","local":0}
   mov %rbx, %r8
+  # {"type":"if","returns":"empty","ifInstructions":[...],"elseInstructions":[]}
   test %r8d, %r8d
   je MODULE0_FUNC0_IF_END2
+  # {"type":"get_local","local":1}
   mov %rcx, %r8
+  # {"type":"get_local","local":2}
   mov %rdx, %r9
+  # {"type":"i64.add"}
   add %r9, %r8
+  # {"type":"get_local","local":2}
   mov %rdx, %r9
+  # {"type":"set_local","local":1}
   mov %r9, %rcx
+  # {"type":"set_local","local":2}
   mov %r8, %rdx
+  # {"type":"get_local","local":0}
   mov %rbx, %r8
+  # {"type":"i32.const","value":1}
   mov $1, %r9d
+  # {"type":"i32.sub"}
   sub %r9d, %r8d
+  # {"type":"set_local","local":0}
   mov %r8, %rbx
+  # {"type":"br","label":1}
   jmp MODULE0_FUNC0_LOOP1
   MODULE0_FUNC0_IF_END2:
+  # {"type":"get_local","local":2}
   mov %rdx, %r8
   MODULE0_RETURN0:
   mov %r8, %rax
@@ -71,8 +90,11 @@ MODULE0_FUNC0:
   ret
 .globl wasm_fib_fib
 wasm_fib_fib:
+  push %rbx
   mov %rdi, %rbx
-  jmp MODULE0_FUNC0
+  call MODULE0_FUNC0
+  pop %rbx
+  ret
 ```
 ```c
 long wasm_fib_fib(int);

@@ -16,10 +16,41 @@ const TESTS = [
 ]
 const FUNC_NAME = /^"(.+)"$/
 
-const execFile = promisify(childProcess.execFile),
+const exec = promisify(childProcess.exec),
+      execFile = promisify(childProcess.execFile),
       readFile = promisify(fs.readFile),
       writeFile = promisify(fs.writeFile)
 
+async function fibTest() {
+	const test = 'fib'
+	const baseFile = `${__dirname}/${test}`
+	const wasmFile = baseFile + '.wasm'
+	try {
+		await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
+	}
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+	try { await execFile(__dirname + '/../main.js', [wasmFile]) }
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+	const runPath = baseFile + '-test'
+	try { await execFile(CC, [baseFile + '.s', runPath + '.c', '-o', runPath]) }
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+	try { await exec(`${runPath} | diff ${baseFile}-expected.txt -`) }
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+
+	return {test, testCount: 1}
+}
 async function sha256Test() {
 	const test = 'sha256'
 	const baseFile = `${__dirname}/${test}`
@@ -155,7 +186,10 @@ function getValue({op, args}: SExpression) {
 			}
 		}
 		return {test, testCount}
-	}).concat([sha256Test()]))
+	}).concat([
+		fibTest(),
+		sha256Test()
+	]))
 
 	let passes = 0
 	for (const {test, testCount} of results) {

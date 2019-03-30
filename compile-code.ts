@@ -279,6 +279,18 @@ function executePush(context: CompilationContext, output: asm.AssemblyInstructio
 		: new asm.PushInstruction(source)
 	)
 }
+function unwindStack(stackHeight: number, context: CompilationContext, output: asm.AssemblyInstruction[]) {
+	let popCount = 0
+	while (context.stackHeight > stackHeight) {
+		if (!context.resolvePop()) popCount++
+	}
+	if (popCount) {
+		output.push(new asm.AddInstruction(
+			{type: 'immediate', value: popCount << 3},
+			{type: 'register', register: 'rsp'}
+		))
+	}
+}
 
 const MMAP_SYSCALL_REGISTERS = new Array<asm.Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
 	.filter(register => !GENERAL_REGISTERS.includes(register))
@@ -380,12 +392,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const hasElse = elseInstructions.length
 			let elseLabel: string
 			if (hasElse) elseLabel = context.makeLabel('ELSE')
-			const {containingLabels, stackHeight} = context
-			containingLabels.push({
-				label: endLabel,
-				stackHeight,
-				result: returns !== 'empty'
-			})
 			let cond = context.resolvePop()
 			if (!cond) { // cond is on the stack
 				cond = INTERMEDIATE_REGISTERS[0]
@@ -396,23 +402,26 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				new asm.TestInstruction(datum, datum),
 				new asm.JumpInstruction(hasElse ? elseLabel! : endLabel, 'e')
 			)
+			const {containingLabels, stackHeight} = context
+			const result = returns !== 'empty'
+			containingLabels.push({label: endLabel, stackHeight, result})
 			compileInstructions(ifInstructions, context, output)
+			containingLabels.pop()
+			unwindStack(stackHeight + Number(result), context, output)
 			if (hasElse) {
-				containingLabels.pop()
-				containingLabels.push({
-					label: elseLabel!,
-					stackHeight,
-					result: returns !== 'empty'
-				})
+				context.stackHeight = stackHeight
+				containingLabels.push({label: elseLabel!, stackHeight, result})
 				output.push(
 					new asm.JumpInstruction(endLabel),
 					new asm.Label(elseLabel!)
 				)
-				if (instruction.returns !== 'empty') context.pop()
 				compileInstructions(elseInstructions, context, output)
+				containingLabels.pop()
+				unwindStack(stackHeight + Number(result), context, output)
+				// In case the else block ends in an unconditional branch that avoids pushing a result
+				if (result && context.stackHeight === stackHeight) context.push()
 			}
 			output.push(new asm.Label(endLabel))
-			containingLabels.pop()
 			break
 		}
 		case 'br':
@@ -432,8 +441,9 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				)
 			}
 			const {containingLabels} = context
-			const {label, result, stackHeight} = containingLabels[containingLabels.length - 1 - instruction.label]
-			const moveResult = result && context.stackHeight > stackHeight
+			const {label, result, stackHeight} =
+				containingLabels[containingLabels.length - 1 - instruction.label]
+			const moveResult = result && context.stackHeight > stackHeight + 1
 			if (moveResult) {
 				const toPop = context.resolvePop()
 				output.push(toPop
@@ -444,16 +454,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					: new asm.PopInstruction(INTERMEDIATE_REGISTERS[0])
 				)
 			}
-			let popCount = 0
-			while (context.stackHeight > stackHeight) {
-				if (!context.resolvePop()) popCount++
-			}
-			if (popCount) {
-				output.push(new asm.AddInstruction(
-					{type: 'immediate', value: popCount << 3},
-					{type: 'register', register: 'rsp'}
-				))
-			}
+			unwindStack(stackHeight + Number(result), context, output)
 			if (moveResult) executePush(context, output, INTERMEDIATE_REGISTERS[0])
 			output.push(new asm.JumpInstruction(label))
 			if (endLabel) output.push(new asm.Label(endLabel))
