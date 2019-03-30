@@ -113,6 +113,12 @@ export class CallInstruction {
 	constructor(readonly target: string) {}
 	get str() { return 'call ' + this.target }
 }
+export class CdqInstruction {
+	get str() { return 'cdq' }
+}
+export class CqoInstruction {
+	get str() { return 'cqo' }
+}
 export class CMoveInstruction extends SrcDestInstruction {
 	constructor(src: Datum, dest: Datum, readonly cond: JumpCond) {
 		super(src, dest)
@@ -121,6 +127,16 @@ export class CMoveInstruction extends SrcDestInstruction {
 }
 export class CmpInstruction extends SrcDestInstruction {
 	get op() { return 'cmp' }
+}
+export class DivInstruction {
+	constructor(
+		readonly src: Datum,
+		readonly signed: boolean,
+		readonly width: Width
+	) {}
+	get str() {
+		return `${this.signed ? 'i' : ''}div${this.width} ${datumToString(this.src)}`
+	}
 }
 export class EnterInstruction {
 	constructor(readonly frameSize: number) {}
@@ -132,6 +148,9 @@ export class JumpInstruction {
 }
 export class LeaveInstruction {
 	get str() { return 'leave' }
+}
+export class LzcntInstruction extends SrcDestInstruction {
+	get op() { return 'lzcnt' }
 }
 export class MoveInstruction extends SrcDestInstruction {
 	get op() { return 'mov' }
@@ -159,6 +178,9 @@ export class OrInstruction extends SrcDestInstruction {
 export class PopInstruction extends FullRegisterInstruction {
 	get str() { return `pop ${this.registerStr}` }
 }
+export class PopcntInstruction extends SrcDestInstruction {
+	get op() { return 'popcnt' }
+}
 // TODO: allow pushing a Datum, not just a register
 export class PushInstruction extends FullRegisterInstruction {
 	get str() { return `push ${this.registerStr}` }
@@ -166,8 +188,14 @@ export class PushInstruction extends FullRegisterInstruction {
 export class RetInstruction {
 	get str() { return 'ret' }
 }
+export class RolInstruction extends SrcDestInstruction {
+	get op() { return 'rol' }
+}
 export class RorInstruction extends SrcDestInstruction {
 	get op() { return 'ror' }
+}
+export class SarInstruction extends SrcDestInstruction {
+	get op() { return 'sar' }
 }
 export class SetInstruction {
 	constructor(readonly dest: Datum, readonly cond: JumpCond) {}
@@ -187,6 +215,9 @@ export class SysCallInstruction {
 }
 export class TestInstruction extends SrcDestInstruction {
 	get op() { return 'test' }
+}
+export class TzcntInstruction extends SrcDestInstruction {
+	get op() { return 'tzcnt' }
 }
 export class XorInstruction extends SrcDestInstruction {
 	get op() { return 'xor' }

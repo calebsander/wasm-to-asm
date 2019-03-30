@@ -4,8 +4,13 @@ import * as fs from 'fs'
 import {promisify} from 'util'
 import {parse, SExpression} from './parse-s'
 
-const CC = 'clang'
-const TESTS = ['fac']
+const CC = 'gcc'
+const TESTS = [
+	// 'address', won't work until f32 and f64 support is implemented
+	'fac',
+	'forward',
+	'i32'
+]
 const FUNC_NAME = /^"(.+)"$/
 
 const execFile = promisify(childProcess.execFile),
@@ -14,11 +19,13 @@ const execFile = promisify(childProcess.execFile),
 
 function getValue({op, args}: SExpression) {
 	switch (op) {
-		case 'i64.const':
+		case 'i32.const':
+		case 'i64.const': {
 			assert.equal(args.length, 1)
 			const [arg] = args
 			assert.equal(arg.args.length, 0)
-			return arg.op + 'L'
+			return op === 'i32.const' ? arg.op : arg.op + 'L'
+		}
 		default:
 			throw new Error('Unknown value type: ' + op)
 	}
@@ -27,88 +34,98 @@ function getValue({op, args}: SExpression) {
 ;(async () => {
 	const results = await Promise.all(TESTS.map(async test => {
 		const wastPath = `${__dirname}/spec/test/core/${test}.wast`
-		const testFile = await readFile(wastPath, 'utf8')
-		const assertsStart = testFile.indexOf('(assert')
-		if (assertsStart < 0) throw new Error(`Test file ${wastPath} does not have asserts`)
-
-		const modulePath = wastPath.replace('.wast', '-module.wast')
-		await writeFile(modulePath, testFile.slice(0, assertsStart))
-		const wasmPath = wastPath.replace('.wast', '.wasm')
-		try {
-			await execFile(__dirname + '/wabt/bin/wat2wasm', [modulePath, '-o', wasmPath])
-		}
-		catch (e) {
-			console.error(e)
-			return
-		}
-		try { await execFile(__dirname + '/../main.js', [wasmPath]) }
-		catch (e) {
-			console.error(e)
-			return
-		}
-
-		let cFile = `
-			#include <assert.h>
-			#include "${test}.h"
-
-			int main() {
-		`
-		let asserts = testFile.slice(assertsStart)
-		let count = 0
-		while (asserts = asserts.trim()) {
-			const {result, rest} = parse(asserts)
-			let processed = true
-			switch (result.op) {
-				case 'assert_return':
-					const [invoke, expected] = result.args
-					assert.equal(invoke.op, 'invoke')
-					const [func, ...args] = invoke.args
-					assert.equal(func.args.length, 0)
-					const funcNameMatch = FUNC_NAME.exec(func.op)
-					if (!funcNameMatch) throw new Error('Not a funtion name: ' + func.op)
-					const funcName = `wasm_${test}_${funcNameMatch[1].replace(/-/g, '_')}`
-					cFile += `
-						assert(${funcName}(${args.map(getValue).join(', ')}) == ${getValue(expected)});
-					`
-					break
-				case 'assert_exhaustion':
-					processed = false
-					break
-				default:
-					throw new Error('Unknown assertion type: ' + result.op)
+		let testFile = await readFile(wastPath, 'utf8')
+		let assertsStart: number
+		let testCount = 0
+		while ((assertsStart = testFile.indexOf('(assert')) >= 0) {
+			const modulePath = wastPath.replace('.wast', '-module.wast')
+			await writeFile(modulePath, testFile.slice(0, assertsStart))
+			const wasmPath = wastPath.replace('.wast', '.wasm')
+			try {
+				await execFile(__dirname + '/wabt/bin/wat2wasm', [modulePath, '-o', wasmPath])
 			}
-			if (processed) count++
-			asserts = rest
-		}
-		cFile += `
+			catch (e) {
+				console.error(e)
+				return
 			}
-		`
-		const sFilePath = wasmPath.replace('.wasm', '.s'),
-		      cFilePath = sFilePath.replace('.s', '-test.c'),
-		      runPath = cFilePath.replace('.c', '')
-		await writeFile(cFilePath, cFile)
-		try { await execFile(CC, [sFilePath, cFilePath, '-o', runPath]) }
-		catch (e) {
-			console.error(e)
-			return
-		}
+			try { await execFile(__dirname + '/../main.js', [wasmPath]) }
+			catch (e) {
+				console.error(e)
+				return
+			}
 
-		try {
-			await execFile(runPath)
-			return {count}
+			let cFile = `
+				#include <assert.h>
+				#include "${test}.h"
+
+				int main() {
+			`
+			const hFilePath = wasmPath.replace('.wasm', '.h')
+			const headerFile = await readFile(hFilePath, 'utf8')
+			const initFunction = `wasm_${test}_init`
+			const hasInit = headerFile.includes(`void ${initFunction}(void);`)
+			if (hasInit) cFile += initFunction + '();\n'
+			const nextModule = testFile.indexOf('\n(module', assertsStart)
+			let asserts = nextModule < 0
+				? testFile.slice(assertsStart)
+				: testFile.slice(assertsStart, nextModule)
+			while (asserts.startsWith('(assert')) {
+				const {result, rest} = parse(asserts)
+				let processed = true
+				switch (result.op) {
+					case 'assert_return':
+						const [invoke, expected] = result.args
+						assert.equal(invoke.op, 'invoke')
+						const [func, ...args] = invoke.args
+						assert.equal(func.args.length, 0)
+						const funcNameMatch = FUNC_NAME.exec(func.op)
+						if (!funcNameMatch) throw new Error('Not a funtion name: ' + func.op)
+						const funcName = `wasm_${test}_${funcNameMatch[1].replace(/-/g, '_')}`
+						cFile += `
+							assert(${funcName}(${args.map(getValue).join(', ')}) == ${getValue(expected)});
+						`
+						break
+					case 'assert_exhaustion':
+					case 'assert_invalid':
+					case 'assert_malformed':
+					case 'assert_trap':
+						processed = false
+						break
+					default:
+						throw new Error('Unknown assertion type: ' + result.op)
+				}
+				if (processed) testCount++
+				asserts = rest.trim()
+			}
+			cFile += `
+				}
+			`
+			testFile = testFile.slice(nextModule)
+			const sFilePath = hFilePath.replace('.h', '.s'),
+			      cFilePath = sFilePath.replace('.s', '-test.c'),
+			      runPath = cFilePath.replace('.c', '')
+			await writeFile(cFilePath, cFile)
+			try { await execFile(CC, ['-g', sFilePath, cFilePath, '-o', runPath]) }
+			catch (e) {
+				console.error(e)
+				return
+			}
+
+			try { await execFile(runPath) }
+			catch (e) {
+				console.error(e)
+				return
+			}
 		}
-		catch (e) {
-			console.error(e)
-			return
-		}
+		return {testCount}
 	}))
 
 	let passes = 0
 	TESTS.forEach((test, i) => {
 		const result = results[i]
 		if (result) {
-			const {count} = result
-			console.log(test, `PASS ${count} test${count === 1 ? '' : 's'}`)
+			const {testCount} = result
+			console.log(test, `PASS ${testCount} test${testCount === 1 ? '' : 's'}`)
 			passes++
 		}
 		else console.log(test, 'FAIL')

@@ -10,9 +10,14 @@ interface ParseResult {
 }
 
 export function parse(text: string): ParseResult {
-	if (text[0] === '(') {
-		let i = 1
-		while (WHITESPACE.test(text[i])) i++
+	let i = 0
+	if (text.slice(0, 2) == ';;') {
+		for (i = 2; text[i] !== '\n'; i++);
+		while (WHITESPACE.test(text[++i]));
+	}
+
+	if (text[i] === '(') {
+		while (WHITESPACE.test(text[++i]));
 		const opStart = i
 		while (!(text[i] === ')' || WHITESPACE.test(text[i]))) i++
 		const op = text.slice(opStart, i)
@@ -29,7 +34,14 @@ export function parse(text: string): ParseResult {
 		}
 		return {result: {op, args}, rest: text.slice(i + 1)}
 	}
-	let i = 1
-	while (!(text[i] === ')' || WHITESPACE.test(text[i]))) i++
+	if (text[i] === '"') {
+		while (text[++i] !== '"') {
+			if (text[i] === '\\') i++ // skip escaped character
+		}
+		i++
+	}
+	else {
+		while (!(text[++i] === ')' || WHITESPACE.test(text[i])));
+	}
 	return {result: {op: text.slice(0, i), args: []}, rest: text.slice(i)}
 }

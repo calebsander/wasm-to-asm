@@ -19,6 +19,9 @@ const GENERAL_REGISTERS: asm.Register[] = [
 ]
 const SHIFT_REGISTER: asm.Register = 'rcx'
 const SHIFT_REGISTER_DATUM = {type: 'register' as 'register', register: SHIFT_REGISTER}
+const DIV_LOWER_DATUM = {type: 'register' as 'register', register: 'rax' as asm.Register}
+const DIV_UPPER_REGISTER: asm.Register = 'rdx'
+const DIV_UPPER_DATUM = {type: 'register' as 'register', register: DIV_UPPER_REGISTER}
 const SYSV_PARAM_REGISTERS: asm.Register[] =
 	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
@@ -282,20 +285,34 @@ const PROT_READ_WRITE: asm.Datum = {type: 'immediate', value: 0x1 | 0x2}
 // MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS
 const MMAP_FLAGS: asm.Datum = {type: 'immediate', value: 0x01 | 0x10 | 0x20}
 const compareOperations = new Map<string, asm.JumpCond>([
+	['eqz', 'e'],
 	['eq', 'e'],
+	['ne', 'ne'],
 	['lt_s', 'l'],
 	['lt_u', 'b'],
-	['gt_s', 'g']
+	['le_s', 'le'],
+	['le_u', 'be'],
+	['gt_s', 'g'],
+	['gt_u', 'a'],
+	['ge_s', 'ge'],
+	['ge_u', 'ae']
 ])
 const arithmeticOperations = new Map([
 	['add', asm.AddInstruction],
 	['sub', asm.SubInstruction],
 	['and', asm.AndInstruction],
 	['or', asm.OrInstruction],
+	['xor', asm.XorInstruction],
 	['shl', asm.ShlInstruction],
+	['shr_s', asm.SarInstruction],
 	['shr_u', asm.ShrInstruction],
-	['rotr', asm.RorInstruction],
-	['xor', asm.XorInstruction]
+	['rotl', asm.RolInstruction],
+	['rotr', asm.RorInstruction]
+])
+const bitCountOperations = new Map([
+	['clz', asm.LzcntInstruction],
+	['ctz', asm.TzcntInstruction],
+	['popcnt', asm.PopcntInstruction]
 ])
 const SHIFT_OPERATIONS = new Set(['shl', 'shr_s', 'shr_u', 'rotl', 'rotr'])
 interface GlobalDirective {
@@ -625,8 +642,15 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.load8_s':
 		case 'i32.load8_u':
 		case 'i32.load16_s':
-		case 'i32.load16_u': {
-			const {type, access: {offset}} = instruction
+		case 'i32.load16_u':
+		case 'i64.load':
+		case 'i64.load8_s':
+		case 'i64.load8_u':
+		case 'i64.load16_s':
+		case 'i64.load16_u':
+		case 'i64.load32_s':
+		case 'i64.load32_u': {
+			const {offset} = instruction.access
 			let register = context.resolvePop()
 			const onStack = !register
 			if (!register) {
@@ -640,15 +664,19 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			))
 			const source: asm.Datum =
 				{type: 'indirect', register: address.register, offset: {register}}
-			const targetDatum: asm.Datum = {type: 'register', register, width: 'l'}
-			output.push(type === 'i32.load'
+			const [type, operation] = instruction.type.split('.')
+			const isLoad32U = operation === 'load32_u'
+			const width = type === 'i32' || isLoad32U ? 'l' : 'q'
+			const targetDatum: asm.Datum = {type: 'register', register, width}
+			output.push(operation === 'load' || isLoad32U
 				? new asm.MoveInstruction(source, targetDatum)
 				: new asm.MoveExtendInstruction(
 						source,
 						targetDatum,
-						type.startsWith('i32.load8') ? 'b' : 'w',
-						'l',
-						type.endsWith('s')
+						operation.startsWith('load8') ? 'b' :
+							operation.startsWith('load16') ? 'w' : 'l',
+						width,
+						operation.endsWith('_s')
 					)
 			)
 			if (onStack) output.push(new asm.PushInstruction(register))
@@ -780,15 +808,31 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			if (pushResult) output.push(new asm.PushInstruction(target!))
 			break
 		}
+		case 'i32.eqz':
+		case 'i32.eq':
+		case 'i32.ne':
+		case 'i32.lt_s':
 		case 'i32.lt_u':
+		case 'i32.le_s':
+		case 'i32.le_u':
 		case 'i32.gt_s':
+		case 'i32.gt_u':
+		case 'i32.ge_s':
+		case 'i32.ge_u':
 		case 'i64.eq':
 		case 'i64.lt_s':
 		case 'i64.gt_s': {
-			let arg2 = context.resolvePop()
-			if (!arg2) {
-				arg2 = INTERMEDIATE_REGISTERS[0]
-				output.push(new asm.PopInstruction(arg2))
+			const [type, operation] = instruction.type.split('.')
+			const width = typeWidth(type as ValueType)
+			let datum2: asm.Datum
+			if (operation === 'eqz') datum2 = {type: 'immediate', value: 0}
+			else {
+				let arg2 = context.resolvePop()
+				if (!arg2) {
+					arg2 = INTERMEDIATE_REGISTERS[0]
+					output.push(new asm.PopInstruction(arg2))
+				}
+				datum2 = {type: 'register', register: arg2, width}
 			}
 			let arg1 = context.resolvePop()
 			const onStack = !arg1
@@ -796,19 +840,41 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				arg1 = INTERMEDIATE_REGISTERS[1]
 				output.push(new asm.PopInstruction(arg1))
 			}
-			const [type, operation] = instruction.type.split('.')
 			const cond = compareOperations.get(operation)
 			if (!cond) throw new Error(`No comparison value found for ${instruction.type}`)
-			const width = typeWidth(type as ValueType)
 			const datum1: asm.Datum = {type: 'register', register: arg1!, width}
 			const datum1Byte: asm.Datum = {...datum1, width: 'b'}
 			output.push(
-				new asm.CmpInstruction({type: 'register', register: arg2, width}, datum1),
+				new asm.CmpInstruction(datum2, datum1),
 				new asm.SetInstruction(datum1Byte, cond),
 				new asm.MoveExtendInstruction(datum1Byte, {...datum1, width: 'l'}, 'b', 'l', false)
 			)
 			context.push()
 			if (onStack) output.push(new asm.PushInstruction(arg1!))
+			break
+		}
+		case 'i32.clz':
+		case 'i32.ctz':
+		case 'i32.popcnt': {
+			const arg = context.resolvePop()
+			const [type, operation] = instruction.type.split('.')
+			const width = type === 'i32' ? 'l' : 'q'
+			const asmInstruction = bitCountOperations.get(operation)
+			if (!asmInstruction) throw new Error('No instruction found for ' + instruction.type)
+			if (arg) {
+				const datum: asm.Datum = {type: 'register', register: arg, width}
+				output.push(new asmInstruction(datum, datum))
+			}
+			else {
+				const datum: asm.Datum = {type: 'indirect', register: 'rsp'}
+				const result: asm.Datum =
+					{type: 'register', register: INTERMEDIATE_REGISTERS[0], width}
+				output.push(
+					new asmInstruction(datum, result),
+					new asm.MoveInstruction(result, datum)
+				)
+			}
+			context.push()
 			break
 		}
 		case 'i32.add':
@@ -817,7 +883,9 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.or':
 		case 'i32.xor':
 		case 'i32.shl':
+		case 'i32.shr_s':
 		case 'i32.shr_u':
+		case 'i32.rotl':
 		case 'i32.rotr':
 		case 'i64.add':
 		case 'i64.sub':
@@ -906,6 +974,59 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				)
 			}
 			context.push()
+			break
+		}
+		case 'i32.div_s':
+		case 'i32.div_u':
+		case 'i32.rem_s':
+		case 'i32.rem_u': {
+			const operand2 = context.resolvePop(),
+			      operand1 = context.resolvePop()
+			const datum1: asm.Datum = operand1
+				? {type: 'register', register: operand1}
+				: {type: 'indirect', register: 'rsp', immediate: 1 << 3}
+			let upperEvict: asm.Datum | undefined
+			if (context.registersUsed().includes(DIV_UPPER_REGISTER)) {
+				upperEvict = {type: 'register', register: INTERMEDIATE_REGISTERS[0]}
+			}
+			if (upperEvict) {
+				output.push(new asm.MoveInstruction(DIV_UPPER_DATUM, upperEvict))
+			}
+			const [type, operation] = instruction.type.split('.')
+			const [op, signedness] = operation.split('_')
+			const i32 = type === 'i32'
+			const width = i32 ? 'l' : 'q'
+			const signed = signedness === 's'
+			const datum2: asm.Datum = operand2
+				? {type: 'register', register: operand2, width}
+				: {type: 'indirect', register: 'rsp'}
+			if (op === 'rem' && signed) {
+				// Special case for INT_MIN % -1, since the remainder
+				// is 0 but the quotient (INT_MAX + 1) won't fit.
+				// So, if the divisor is -1, set it to 1.
+				const oneRegister: asm.Datum =
+					{type: 'register', register: INTERMEDIATE_REGISTERS[1], width}
+				output.push(
+					new asm.MoveInstruction({type: 'immediate', value: 1}, oneRegister),
+					new asm.CmpInstruction({type: 'immediate', value: -1}, datum2, width),
+					new asm.CMoveInstruction(oneRegister, datum2, 'e')
+				)
+			}
+			const result = op === 'div' ? DIV_LOWER_DATUM : DIV_UPPER_DATUM
+			output.push(
+				new asm.MoveInstruction(datum1, DIV_LOWER_DATUM),
+				signed
+					? i32 ? new asm.CdqInstruction : new asm.CqoInstruction
+					: new asm.XorInstruction(DIV_UPPER_DATUM, DIV_UPPER_DATUM),
+				new asm.DivInstruction(datum2, signed, width)
+			)
+			if (result.register !== datum1.register) {
+				output.push(new asm.MoveInstruction(result, datum1))
+			}
+			context.resolvePush()
+			if (upperEvict) {
+				output.push(new asm.MoveInstruction(upperEvict, DIV_UPPER_DATUM))
+			}
 			break
 		}
 		case 'i32.wrap': {
