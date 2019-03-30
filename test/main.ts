@@ -38,7 +38,9 @@ async function fibTest() {
 		return {test}
 	}
 	const runPath = baseFile + '-test'
-	try { await execFile(CC, [baseFile + '.s', runPath + '.c', '-o', runPath]) }
+	try {
+		await execFile(CC, ['-std=c11', baseFile + '.s', runPath + '.c', '-o', runPath])
+	}
 	catch (e) {
 		console.error(e)
 		return {test}
@@ -69,7 +71,7 @@ async function sha256Test() {
 	}
 	const runPath = baseFile + '-test'
 	try {
-		await execFile(CC, [baseFile + '.s', runPath + '.c', '-o', runPath, '-lcrypto'])
+		await execFile(CC, ['-std=c11', baseFile + '.s', runPath + '.c', '-o', runPath, '-lcrypto'])
 	}
 	catch (e) {
 		console.error(e)
@@ -173,7 +175,7 @@ function getValue({op, args}: SExpression) {
 			      cFilePath = sFilePath.replace('.s', '-test.c'),
 			      runPath = cFilePath.replace('.c', '')
 			await writeFile(cFilePath, cFile)
-			try { await execFile(CC, [sFilePath, cFilePath, '-o', runPath]) }
+			try { await execFile(CC, ['-std=c11', sFilePath, cFilePath, '-o', runPath]) }
 			catch (e) {
 				console.error(e)
 				return {test}
