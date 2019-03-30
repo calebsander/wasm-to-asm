@@ -2,6 +2,7 @@ import {strict as assert} from 'assert'
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import {promisify} from 'util'
+import {INVALID_EXPORT_CHAR} from '../compile-code'
 import {parse, SExpression} from './parse-s'
 
 const CC = 'gcc'
@@ -10,7 +11,8 @@ const TESTS = [
 	'fac',
 	'forward',
 	'i32',
-	'i64'
+	'i64',
+	'int_exprs'
 ]
 const FUNC_NAME = /^"(.+)"$/
 
@@ -81,7 +83,8 @@ function getValue({op, args}: SExpression) {
 						assert.equal(func.args.length, 0)
 						const funcNameMatch = FUNC_NAME.exec(func.op)
 						if (!funcNameMatch) throw new Error('Not a funtion name: ' + func.op)
-						const funcName = `wasm_${test}_${funcNameMatch[1].replace(/-/g, '_')}`
+						const funcName =
+							`wasm_${test}_${funcNameMatch[1].replace(INVALID_EXPORT_CHAR, '_')}`
 						cFile += `
 							assert(${funcName}(${args.map(getValue).join(', ')}) == ${getValue(expected)});
 						`

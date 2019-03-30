@@ -19,13 +19,16 @@ const GENERAL_REGISTERS: asm.Register[] = [
 ]
 const SHIFT_REGISTER: asm.Register = 'rcx'
 const SHIFT_REGISTER_DATUM = {type: 'register' as 'register', register: SHIFT_REGISTER}
-const DIV_LOWER_DATUM = {type: 'register' as 'register', register: 'rax' as asm.Register}
+const DIV_LOWER_REGISTER: asm.Register = 'rax'
+const DIV_LOWER_DATUM = {type: 'register' as 'register', register: DIV_LOWER_REGISTER}
 const DIV_UPPER_REGISTER: asm.Register = 'rdx'
 const DIV_UPPER_DATUM = {type: 'register' as 'register', register: DIV_UPPER_REGISTER}
 const SYSV_PARAM_REGISTERS: asm.Register[] =
 	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
 	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
+
+export const INVALID_EXPORT_CHAR = /[^A-Za-z0-9_]/g
 
 class BPRelative {
 	constructor(public readonly index: number) {}
@@ -72,9 +75,9 @@ class ModuleContext {
 	addGlobals(globals: Global[]): void {
 		this.globalTypes.push(...globals.map(({type}) => type))
 	}
-	addExports(exports: Export[]): void {
-		for (let {name, description: {type, index}} of exports) {
-			name = name.replace(/-/g, '_')
+	addExports(exportSection: Export[]): void {
+		for (let {name, description: {type, index}} of exportSection) {
+			name = name.replace(INVALID_EXPORT_CHAR, '_')
 			let exportMap: Map<Number, string[]>
 			switch (type) {
 				case 'memory':
@@ -1006,20 +1009,22 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const datum1: asm.Datum = operand1
 				? {type: 'register', register: operand1}
 				: {type: 'indirect', register: 'rsp', immediate: 1 << 3}
-			let upperEvict: asm.Datum | undefined
-			if (context.registersUsed().includes(DIV_UPPER_REGISTER)) {
-				upperEvict = {type: 'register', register: INTERMEDIATE_REGISTERS[0]}
-			}
-			if (upperEvict) {
-				output.push(new asm.MoveInstruction(DIV_UPPER_DATUM, upperEvict))
+			let upperEvictRegister: asm.Register | undefined
+			let upperEvictDatum: asm.Datum | undefined
+			const divisorEvicted = operand2 === DIV_UPPER_REGISTER
+			if (divisorEvicted || context.registersUsed().includes(DIV_UPPER_REGISTER)) {
+				[upperEvictRegister] = INTERMEDIATE_REGISTERS
+				upperEvictDatum = {type: 'register', register: upperEvictRegister}
+				output.push(new asm.MoveInstruction(DIV_UPPER_DATUM, upperEvictDatum))
 			}
 			const [type, operation] = instruction.type.split('.')
 			const [op, signedness] = operation.split('_')
 			const i32 = type === 'i32'
 			const width = i32 ? 'l' : 'q'
 			const signed = signedness === 's'
-			const datum2: asm.Datum = operand2
-				? {type: 'register', register: operand2, width}
+			const datum2: asm.Datum =
+				divisorEvicted ? {type: 'register', register: upperEvictRegister!, width} :
+				operand2 ? {type: 'register', register: operand2, width}
 				: {type: 'indirect', register: 'rsp'}
 			if (op === 'rem' && signed) {
 				// Special case for INT_MIN % -1, since the remainder
@@ -1034,8 +1039,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				)
 			}
 			const result = op === 'div' ? DIV_LOWER_DATUM : DIV_UPPER_DATUM
+			if (operand1 !== DIV_LOWER_REGISTER) {
+				output.push(new asm.MoveInstruction(datum1, DIV_LOWER_DATUM))
+			}
 			output.push(
-				new asm.MoveInstruction(datum1, DIV_LOWER_DATUM),
 				signed
 					? i32 ? new asm.CdqInstruction : new asm.CqoInstruction
 					: new asm.XorInstruction(DIV_UPPER_DATUM, DIV_UPPER_DATUM),
@@ -1045,8 +1052,8 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				output.push(new asm.MoveInstruction(result, datum1))
 			}
 			context.resolvePush()
-			if (upperEvict) {
-				output.push(new asm.MoveInstruction(upperEvict, DIV_UPPER_DATUM))
+			if (upperEvictDatum) {
+				output.push(new asm.MoveInstruction(upperEvictDatum, DIV_UPPER_DATUM))
 			}
 			break
 		}
@@ -1054,11 +1061,27 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			let value = context.resolvePop()
 			const onStack = !value
 			if (onStack) {
-				value = INTERMEDIATE_REGISTERS[0]
+				[value] = INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(value))
 			}
 			const register: asm.Datum = {type: 'register', register: value!, width: 'l'}
 			output.push(new asm.MoveInstruction(register, register))
+			context.push()
+			if (onStack) output.push(new asm.PushInstruction(value!))
+			break
+		}
+		case 'i64.extend_s': {
+			let value = context.resolvePop()
+			const onStack = !value
+			if (onStack) {
+				[value] = INTERMEDIATE_REGISTERS
+				output.push(new asm.PopInstruction(value))
+			}
+			output.push(new asm.MoveExtendInstruction(
+				{type: 'register', register: value!, width: 'l'},
+				{type: 'register', register: value!, width: 'q'},
+				'l', 'q', true
+			))
 			context.push()
 			if (onStack) output.push(new asm.PushInstruction(value!))
 			break
