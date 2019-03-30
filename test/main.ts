@@ -9,7 +9,8 @@ const TESTS = [
 	// 'address', won't work until f32 and f64 support is implemented
 	'fac',
 	'forward',
-	'i32'
+	'i32',
+	'i64'
 ]
 const FUNC_NAME = /^"(.+)"$/
 
