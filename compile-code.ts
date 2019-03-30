@@ -18,11 +18,11 @@ const GENERAL_REGISTERS: asm.Register[] = [
 	'rbp'
 ]
 const SHIFT_REGISTER: asm.Register = 'rcx'
-const SHIFT_REGISTER_DATUM = {type: 'register' as 'register', register: SHIFT_REGISTER}
+const SHIFT_REGISTER_DATUM = {type: 'register' as const, register: SHIFT_REGISTER}
 const DIV_LOWER_REGISTER: asm.Register = 'rax'
-const DIV_LOWER_DATUM = {type: 'register' as 'register', register: DIV_LOWER_REGISTER}
+const DIV_LOWER_DATUM = {type: 'register' as const, register: DIV_LOWER_REGISTER}
 const DIV_UPPER_REGISTER: asm.Register = 'rdx'
-const DIV_UPPER_DATUM = {type: 'register' as 'register', register: DIV_UPPER_REGISTER}
+const DIV_UPPER_DATUM = {type: 'register' as const, register: DIV_UPPER_REGISTER}
 const SYSV_PARAM_REGISTERS: asm.Register[] =
 	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
