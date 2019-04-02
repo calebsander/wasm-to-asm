@@ -5,7 +5,8 @@ import {promisify} from 'util'
 import {INVALID_EXPORT_CHAR} from '../compile-code'
 import {parse, SExpression} from './parse-s'
 
-const CC = 'gcc'
+const CC = 'gcc', C_STD = '-std=c11'
+const SUCCESS = 'success'
 const TESTS = [
 	// 'address', won't work until f32 and f64 support is implemented
 	'fac',
@@ -21,31 +22,21 @@ const exec = promisify(childProcess.exec),
       readFile = promisify(fs.readFile),
       writeFile = promisify(fs.writeFile)
 
-async function fibTest() {
-	const test = 'fib'
+async function compileTest(test: string, ...ccArgs: string[]) {
 	const baseFile = `${__dirname}/${test}`
 	const wasmFile = baseFile + '.wasm'
-	try {
-		await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
-	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-	try { await execFile('node', [__dirname + '/../main.js', wasmFile]) }
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
+	await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
+	await execFile('node', [__dirname + '/../main.js', wasmFile])
 	const runPath = baseFile + '-test'
+	await execFile(CC, [C_STD, baseFile + '.s', runPath + '.c', '-o', runPath, ...ccArgs])
+	return {baseFile, runPath}
+}
+async function fibTest() {
+	const test = 'fib'
 	try {
-		await execFile(CC, ['-std=c11', baseFile + '.s', runPath + '.c', '-o', runPath])
+		const {baseFile, runPath} = await compileTest(test)
+		await exec(`${runPath} | diff ${baseFile}-expected.txt -`)
 	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-	try { await exec(`${runPath} | diff ${baseFile}-expected.txt -`) }
 	catch (e) {
 		console.error(e)
 		return {test}
@@ -55,29 +46,10 @@ async function fibTest() {
 }
 async function sha256Test() {
 	const test = 'sha256'
-	const baseFile = `${__dirname}/${test}`
-	const wasmFile = baseFile + '.wasm'
 	try {
-		await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
+		const {runPath} = await compileTest(test, '-lcrypto')
+		await execFile(runPath)
 	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-	try { await execFile('node', [__dirname + '/../main.js', wasmFile]) }
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-	const runPath = baseFile + '-test'
-	try {
-		await execFile(CC, ['-std=c11', baseFile + '.s', runPath + '.c', '-o', runPath, '-lcrypto'])
-	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-	try { await execFile(runPath) }
 	catch (e) {
 		console.error(e)
 		return {test}
@@ -100,7 +72,7 @@ function getValue({op, args}: SExpression) {
 	}
 }
 
-;(async () => {
+(async () => {
 	const results = await Promise.all(TESTS.map(async test => {
 		const wastPath = `${__dirname}/spec/test/core/${test}.wast`
 		let testFile = await readFile(wastPath, 'utf8')
@@ -112,12 +84,8 @@ function getValue({op, args}: SExpression) {
 			const wasmPath = wastPath.replace('.wast', '.wasm')
 			try {
 				await execFile(__dirname + '/wabt/bin/wat2wasm', [modulePath, '-o', wasmPath])
+				await execFile('node', [__dirname + '/../main.js', wasmPath])
 			}
-			catch (e) {
-				console.error(e)
-				return {test}
-			}
-			try { await execFile('node', [__dirname + '/../main.js', wasmPath]) }
 			catch (e) {
 				console.error(e)
 				return {test}
@@ -125,6 +93,7 @@ function getValue({op, args}: SExpression) {
 
 			let cFile = `
 				#include <assert.h>
+				#include <stdio.h>
 				#include "${test}.h"
 
 				int main() {
@@ -168,6 +137,7 @@ function getValue({op, args}: SExpression) {
 				asserts = rest.trim()
 			}
 			cFile += `
+					printf("${SUCCESS}");
 				}
 			`
 			testFile = testFile.slice(nextModule)
@@ -175,13 +145,11 @@ function getValue({op, args}: SExpression) {
 			      cFilePath = sFilePath.replace('.s', '-test.c'),
 			      runPath = cFilePath.replace('.c', '')
 			await writeFile(cFilePath, cFile)
-			try { await execFile(CC, ['-std=c11', sFilePath, cFilePath, '-o', runPath]) }
-			catch (e) {
-				console.error(e)
-				return {test}
+			try {
+				await execFile(CC, [C_STD, sFilePath, cFilePath, '-o', runPath])
+				const {stdout} = await execFile(runPath)
+				if (stdout !== SUCCESS) throw new Error('Unexpected output:\n' + stdout)
 			}
-
-			try { await execFile(runPath) }
 			catch (e) {
 				console.error(e)
 				return {test}
