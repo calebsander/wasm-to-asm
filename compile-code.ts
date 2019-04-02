@@ -293,6 +293,7 @@ function unwindStack(stackHeight: number, context: CompilationContext, output: a
 	}
 }
 
+const STACK_TOP: asm.Datum = {type: 'indirect', register: 'rsp'}
 const MMAP_SYSCALL_REGISTERS =
 	new Array<asm.Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
 	.filter(register => GENERAL_REGISTERS.includes(register))
@@ -611,14 +612,11 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const tee = type === 'tee_local'
 			let value = context.resolvePop()
 			if (!value) {
-				value = INTERMEDIATE_REGISTERS[0]
-				if (tee) {
-					output.push(new asm.MoveInstruction(
-						{type: 'indirect', register: 'rsp'},
-						{type: 'register', register: value}
-					))
-				}
-				else output.push(new asm.PopInstruction(value))
+				[value] = INTERMEDIATE_REGISTERS
+				output.push(tee
+					? new asm.MoveInstruction(STACK_TOP, {type: 'register', register: value})
+					: new asm.PopInstruction(value)
+				)
 			}
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value!},
@@ -846,28 +844,33 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			else {
 				let arg2 = context.resolvePop()
 				if (!arg2) {
-					arg2 = INTERMEDIATE_REGISTERS[0]
+					[arg2] = INTERMEDIATE_REGISTERS
 					output.push(new asm.PopInstruction(arg2))
 				}
 				datum2 = {type: 'register', register: arg2, width}
 			}
-			let arg1 = context.resolvePop()
-			const onStack = !arg1
-			if (onStack) {
-				arg1 = INTERMEDIATE_REGISTERS[1]
-				output.push(new asm.PopInstruction(arg1))
+			const arg1 = context.resolvePop()
+			let datum1: asm.Datum, resultRegister: asm.Register
+			if (arg1) {
+				datum1 = {type: 'register', register: arg1, width}
+				resultRegister = arg1
+			}
+			else {
+				datum1 = STACK_TOP
+				;[resultRegister] = INTERMEDIATE_REGISTERS
 			}
 			const cond = compareOperations.get(operation)
 			if (!cond) throw new Error(`No comparison value found for ${instruction.type}`)
-			const datum1: asm.Datum = {type: 'register', register: arg1!, width}
-			const datum1Byte: asm.Datum = {...datum1, width: 'b'}
+			const result8: asm.Datum =
+				{type: 'register', register: resultRegister, width: 'b'}
+			const result32: asm.Datum = {...result8, width: 'l'}
 			output.push(
-				new asm.CmpInstruction(datum2, datum1),
-				new asm.SetInstruction(datum1Byte, cond),
-				new asm.MoveExtendInstruction(datum1Byte, {...datum1, width: 'l'}, 'b', 'l', false)
+				new asm.CmpInstruction(datum2, datum1, width),
+				new asm.SetInstruction(result8, cond),
+				new asm.MoveExtendInstruction(result8, result32, 'b', 'l', false)
 			)
 			context.push()
-			if (onStack) output.push(new asm.PushInstruction(arg1!))
+			if (!arg1) output.push(new asm.MoveInstruction(result32, STACK_TOP))
 			break
 		}
 		case 'i32.clz':
@@ -886,12 +889,11 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				output.push(new asmInstruction(datum, datum))
 			}
 			else {
-				const datum: asm.Datum = {type: 'indirect', register: 'rsp'}
 				const result: asm.Datum =
 					{type: 'register', register: INTERMEDIATE_REGISTERS[0], width}
 				output.push(
-					new asmInstruction(datum, result),
-					new asm.MoveInstruction(result, datum)
+					new asmInstruction(STACK_TOP, result),
+					new asm.MoveInstruction(result, STACK_TOP)
 				)
 			}
 			context.push()
@@ -940,7 +942,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				datum2,
 				operand1
 					? {type: 'register', register: operand1, width}
-					: {type: 'indirect', register: 'rsp'},
+					: STACK_TOP,
 				width
 			))
 			context.push()
@@ -955,7 +957,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				output.push(new asm.ImulInstruction(
 					operand2
 						? {type: 'register', register: operand2, width}
-						: {type: 'indirect', register: 'rsp'},
+						: STACK_TOP,
 					{type: 'register', register: operand1, width}
 				))
 			}
@@ -964,11 +966,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					[operand2] = INTERMEDIATE_REGISTERS
 					output.push(new asm.PopInstruction(operand2))
 				}
-				const datum2: asm.Datum = {type: 'register', register: operand2, width},
-				      stack: asm.Datum = {type: 'indirect', register: 'rsp'}
+				const datum2: asm.Datum = {type: 'register', register: operand2, width}
 				output.push(
-					new asm.ImulInstruction(stack, datum2),
-					new asm.MoveInstruction(datum2, stack)
+					new asm.ImulInstruction(STACK_TOP, datum2),
+					new asm.MoveInstruction(datum2, STACK_TOP)
 				)
 			}
 			context.push()
@@ -994,7 +995,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const signed = signedness === 's'
 			const datum2: asm.Datum = operand2
 				? {type: 'register', register: operand2, width}
-				: {type: 'indirect', register: 'rsp'}
+				: STACK_TOP
 			if (op === 'rem' && signed) {
 				// Special case for INT_MIN % -1, since the remainder
 				// is 0 but the quotient (INT_MAX + 1) won't fit.
