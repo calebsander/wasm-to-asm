@@ -687,10 +687,12 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				: new asm.MoveExtendInstruction(
 						source,
 						targetDatum,
-						operation.startsWith('load8') ? 'b' :
-							operation.startsWith('load16') ? 'w' : 'l',
-						width,
-						operation.endsWith('_s')
+						operation.endsWith('_s'),
+						{
+							src: operation.startsWith('load8') ? 'b' :
+								operation.startsWith('load16') ? 'w' : 'l',
+							dest: width
+						}
 					)
 			)
 			if (onStack) output.push(new asm.PushInstruction(register))
@@ -867,7 +869,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			output.push(
 				new asm.CmpInstruction(datum2, datum1, width),
 				new asm.SetInstruction(result8, cond),
-				new asm.MoveExtendInstruction(result8, result32, 'b', 'l', false)
+				new asm.MoveExtendInstruction(result8, result32, false)
 			)
 			context.push()
 			if (!arg1) output.push(new asm.MoveInstruction(result32, STACK_TOP))
@@ -1047,7 +1049,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			output.push(new asm.MoveExtendInstruction(
 				{type: 'register', register: value!, width: 'l'},
 				{type: 'register', register: value!, width: 'q'},
-				'l', 'q', true
+				true
 			))
 			context.push()
 			if (onStack) output.push(new asm.PushInstruction(value!))

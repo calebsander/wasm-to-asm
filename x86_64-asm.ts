@@ -159,14 +159,16 @@ export class MoveExtendInstruction extends SrcDestInstruction {
 	constructor(
 		src: Datum,
 		dest: Datum,
-		readonly srcWidth: Width,
-		readonly destWidth: Width,
-		readonly signed: boolean
-	) {
-		super(src, dest)
-	}
+		readonly signed: boolean,
+		readonly widths?: {src: Width, dest: Width}
+	) { super(src, dest) }
 	get op() {
-		return `mov${this.signed ? 's' : 'z'}${this.srcWidth}${this.destWidth}`
+		const movPrefix = `mov${this.signed ? 's' : 'z'}`
+		if (this.widths) {
+			const {src, dest} = this.widths
+			return movPrefix + src + dest
+		}
+		return movPrefix + 'x'
 	}
 }
 export class ImulInstruction extends SrcDestInstruction {
