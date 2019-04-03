@@ -1,5 +1,5 @@
 import {FunctionDeclaration, getCType, GlobalDeclaration, HeaderDeclaration} from './c-header'
-import {Instruction} from './parse-instruction'
+import {Instruction, ResultType} from './parse-instruction'
 import {CodeSection, Export, FunctionType, Global, GlobalType, Import, Section} from './parse-module'
 import {ValueType} from './parse-value-type'
 import * as asm from './x86_64-asm'
@@ -9,10 +9,10 @@ function* reverse<A>(arr: A[]) {
 }
 const flatten = <A>(sections: A[][]) => ([] as A[]).concat(...sections)
 
-const INTERMEDIATE_REGISTERS: asm.Register[] = ['rax', 'rcx', 'rdx']
-const RESULT_REGISTER: asm.Register = 'rax'
+const INT_INTERMEDIATE_REGISTERS: asm.Register[] = ['rax', 'rcx', 'rdx']
+const [INT_RESULT_REGISTER] = INT_INTERMEDIATE_REGISTERS
 const BASE_POINTER_REGISTER: asm.Register = 'rbp'
-const GENERAL_REGISTERS: asm.Register[] = [
+const INT_GENERAL_REGISTERS: asm.Register[] = [
 	'rdi', 'rsi',
 	'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15',
 	'rbx', 'rbp'
@@ -24,10 +24,18 @@ const DIV_LOWER_REGISTER: asm.Register = 'rax'
 const DIV_LOWER_DATUM = {type: 'register' as const, register: DIV_LOWER_REGISTER}
 const DIV_UPPER_REGISTER: asm.Register = 'rdx'
 const DIV_UPPER_DATUM = {type: 'register' as const, register: DIV_UPPER_REGISTER}
-const SYSV_PARAM_REGISTERS: asm.Register[] =
+const SYSV_INT_PARAM_REGISTERS: asm.Register[] =
 	['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+const SYSV_FLOAT_PARAM_REGISTERS =
+	new Array(8).fill(0).map((_, i) => `xmm${i}` as asm.Register)
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
 	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
+const FLOAT_INTERMEDIATE_COUNT = 2
+const FLOAT_INTERMEDIATE_REGISTERS = new Array(FLOAT_INTERMEDIATE_COUNT)
+	.fill(0).map((_, i) => `xmm${i}` as asm.Register)
+const [FLOAT_RESULT_REGISTER] = FLOAT_INTERMEDIATE_REGISTERS
+const FLOAT_GENERAL_REGISTERS = new Array(16 - FLOAT_INTERMEDIATE_COUNT)
+	.fill(0).map((_, i) => `xmm${FLOAT_INTERMEDIATE_COUNT + i}` as asm.Register)
 
 export const INVALID_EXPORT_CHAR = /[^A-Za-z0-9_]/g
 
@@ -39,17 +47,26 @@ class BPRelative {
 }
 
 const typeWidth = (type: ValueType): asm.Width =>
-	type === 'i32' ? 'l' : 'q'
+	type === 'i32' ? 'l' :
+	type === 'i64' ? 'q' :
+	type === 'f32' ? 's' : 'd'
+const isFloat = (type: ValueType): boolean =>
+	type[0] === 'f'
 
 interface BlockReference {
 	label: string
-	stackHeight: number
-	result: boolean
+	intStackHeight: number
+	floatStackHeight: number
+	result?: ValueType
 }
 interface FunctionStats {
 	params: ValueType[]
 	locals: ValueType[]
-	result: boolean
+	result?: ValueType
+}
+interface LocalLocation {
+	float: boolean
+	index: number
 }
 
 interface ImportReference {
@@ -122,12 +139,11 @@ class ModuleContext {
 	private get baseGlobalIndex(): number {
 		return this.importGlobals.length
 	}
-	resolveGlobalWidth(index: number): asm.Width {
+	resolveGlobalType(index: number): ValueType {
 		const moduleGlobalIndex = index - this.baseGlobalIndex
-		return typeWidth(moduleGlobalIndex < 0
+		return moduleGlobalIndex < 0
 			? this.importGlobalTypes[index]
 			: this.globalTypes[moduleGlobalIndex].type
-		)
 	}
 	resolveGlobalLabel(index: number): string {
 		const moduleGlobalIndex = index - this.baseGlobalIndex
@@ -173,47 +189,81 @@ class ModuleContext {
 		return 0x100000000 * (this.index + 1)
 	}
 }
-// TODO: support f32 and f64 values
 class CompilationContext {
-	readonly params: number
-	readonly locals: number
-	readonly result: boolean
-	readonly localTypes: ReadonlyArray<ValueType>
-	public stackHeight = 0
-	private maxStackHeight = 0
-	private generalRegisters: ReadonlyArray<asm.Register>
+	readonly params: LocalLocation[]
+	readonly locals: LocalLocation[]
+	readonly result?: ValueType
+	private intLocalCount = 0
+	private floatLocalCount = 0
+	private readonly stackFloats: boolean[] = []
+	private intStackHeight = 0
+	private floatStackHeight = 0
+	private maxIntStackHeight = 0
+	private maxFloatStackHeight = 0
+	private intRegisters: ReadonlyArray<asm.Register>
 	private labelCount = 0
-	readonly containingLabels: BlockReference[] = []
+	private readonly containingLabels: BlockReference[] = []
 
 	constructor(
 		readonly moduleContext: ModuleContext,
 		readonly functionsStats: Map<number, FunctionStats>,
 		readonly functionIndex: number
 	) {
-		const thisStats = functionsStats.get(functionIndex)!
+		const thisStats = functionsStats.get(functionIndex)
+		if (!thisStats) throw new Error(`No function stats for function ${functionIndex}`)
 		const {params, locals, result} = thisStats
-		this.params = params.length
-		this.locals = locals.length
+		const getLocalLocation = (param: ValueType): LocalLocation => {
+			const float = isFloat(param)
+			return {
+				float,
+				index: float ? this.floatLocalCount++ : this.intLocalCount++
+			}
+		}
+		this.params = params.map(getLocalLocation)
+		this.locals = locals.map(getLocalLocation)
 		this.result = result
-		this.localTypes = params.concat(locals)
-		this.generalRegisters = GENERAL_REGISTERS
+		this.intRegisters = INT_GENERAL_REGISTERS
 		if (this.usesBP) {
-			this.generalRegisters = this.generalRegisters.filter(
+			this.intRegisters = this.intRegisters.filter(
 				register => register !== BASE_POINTER_REGISTER
 			)
 		}
 	}
 
-	push(): void {
-		const newStackHeight = ++this.stackHeight
-		if (newStackHeight > this.maxStackHeight) this.maxStackHeight = newStackHeight
+	push(float: boolean): void {
+		this.stackFloats.push(float)
+		if (float) {
+			this.maxFloatStackHeight =
+				Math.max(++this.floatStackHeight, this.maxFloatStackHeight)
+		}
+		else {
+			this.maxIntStackHeight =
+				Math.max(++this.intStackHeight, this.maxIntStackHeight)
+		}
 	}
-	pop(): void {
-		this.stackHeight--
+	pop(): boolean {
+		const float = this.peek()
+		this.stackFloats.pop()
+		if (float) this.floatStackHeight--
+		else this.intStackHeight--
+		return float
 	}
-	resolveParam(index: number): asm.Register | BPRelative {
-		return (this.generalRegisters as (asm.Register | undefined)[])[index] ||
-			new BPRelative(index - this.generalRegisters.length)
+	peek(): boolean {
+		const stackHeight = this.stackFloats.length
+		if (!stackHeight) throw new Error('Empty stack')
+		return this.stackFloats[stackHeight - 1]
+	}
+	getParam(paramIndex: number) {
+		return (this.params as (LocalLocation | undefined)[])[paramIndex] ||
+			this.locals[paramIndex - this.params.length]
+	}
+	resolveParam(paramIndex: number): asm.Register | BPRelative {
+		const {float, index} = this.getParam(paramIndex)
+		const generalRegisters = float ? FLOAT_GENERAL_REGISTERS : this.intRegisters
+		return (generalRegisters as (asm.Register | undefined)[])[index] ||
+			new BPRelative( // all float registers are stored after all int registers
+				index - generalRegisters.length + (float ? this.bpInts : 0)
+			)
 	}
 	resolveParamDatum(index: number): asm.Datum {
 		const resolved = this.resolveParam(index)
@@ -222,67 +272,117 @@ class CompilationContext {
 			: {type: 'register', register: resolved}
 	}
 	resolveLocal(index: number): asm.Register | BPRelative {
-		return this.resolveParam(this.params + index)
+		return this.resolveParam(this.params.length + index)
 	}
-	resolveStack(index: number): asm.Register | BPRelative {
-		return this.resolveLocal(this.locals + index)
+	private resolveStackTop(float: boolean): asm.Register | undefined {
+		const generalRegisters = float ? FLOAT_GENERAL_REGISTERS : this.intRegisters
+		const index = float
+			? this.floatLocalCount + this.floatStackHeight
+			: this.intLocalCount + this.intStackHeight
+		return (generalRegisters as (asm.Register | undefined)[])[index]
 	}
-	resolvePush(): asm.Register | undefined {
-		const resolvedIndex = this.resolveStack(this.stackHeight)
-		this.push()
-		return resolvedIndex instanceof BPRelative ? undefined : resolvedIndex
+	resolvePush(float: boolean): asm.Register | undefined {
+		const resolved = this.resolveStackTop(float)
+		this.push(float)
+		return resolved
 	}
 	resolvePop(): asm.Register | undefined {
-		this.pop()
-		const resolvedIndex = this.resolveStack(this.stackHeight)
-		return resolvedIndex instanceof BPRelative ? undefined : resolvedIndex
+		const float = this.pop()
+		return this.resolveStackTop(float)
 	}
 	// If wholeFunction is true, maxStackHeight is used and params are excluded
 	registersUsed(wholeFunction?: true): asm.Register[] {
 		const toSave: asm.Register[] = []
 		if (!wholeFunction) {
 			const {params} = this
-			for (let i = 0; i < params; i++) {
+			for (let i = 0; i < params.length; i++) {
 				const resolved = this.resolveParam(i)
 				if (resolved instanceof BPRelative) return toSave
 				toSave.push(resolved)
 			}
 		}
-		const {locals} = this
-		for (let i = 0; i < locals; i++) {
+		const {
+			locals,
+			intStackHeight: originalIntHeight,
+			floatStackHeight: originalFloatHeight
+		} = this
+		for (let i = 0; i < locals.length; i++) {
 			const resolved = this.resolveLocal(i)
 			if (resolved instanceof BPRelative) return toSave
 			toSave.push(resolved)
 		}
-		const stackHeight = wholeFunction ? this.maxStackHeight : this.stackHeight
-		for (let i = 0; i < stackHeight; i++) {
-			const resolved = this.resolveStack(i)
-			if (resolved instanceof BPRelative) return toSave
-			toSave.push(resolved)
+		let intStackHeight: number, floatStackHeight: number
+		if (wholeFunction) {
+			({maxIntStackHeight: intStackHeight, maxFloatStackHeight: floatStackHeight} = this)
 		}
+		else {
+			({intStackHeight, floatStackHeight} = this)
+		}
+		for (let stackHeight = 0; stackHeight < intStackHeight; stackHeight++) {
+			this.intStackHeight = stackHeight
+			const resolved = this.resolveStackTop(false)
+			if (resolved) toSave.push(resolved)
+		}
+		for (let stackHeight = 0; stackHeight < floatStackHeight; stackHeight++) {
+			this.floatStackHeight = stackHeight
+			const resolved = this.resolveStackTop(true)
+			if (resolved) toSave.push(resolved)
+		}
+		this.intStackHeight = originalIntHeight
+		this.floatStackHeight = originalFloatHeight
 		return toSave
 	}
 	makeLabel(prefix: string): string {
 		return `${this.moduleContext.functionLabel(this.functionIndex)}_${prefix}${++this.labelCount}`
 	}
+	getStackHeight(float: boolean): number {
+		return float ? this.floatStackHeight : this.intStackHeight
+	}
+	setStackHeights(intStackHeight: number, floatStackHeight: number) {
+		this.intStackHeight = intStackHeight
+		this.floatStackHeight = floatStackHeight
+		this.maxIntStackHeight = Math.max(intStackHeight, this.maxIntStackHeight)
+		this.maxFloatStackHeight = Math.max(floatStackHeight, this.maxFloatStackHeight)
+	}
+	pushLabel(label: string, returns: ResultType): void {
+		this.containingLabels.push({
+			label,
+			intStackHeight: this.intStackHeight,
+			floatStackHeight: this.floatStackHeight,
+			result: returns === 'empty' ? undefined : returns
+		})
+	}
+	popLabel(): void {
+		this.containingLabels.pop()
+	}
+	getNestedLabel(nesting: number): BlockReference {
+		return this.containingLabels[this.containingLabels.length - 1 - nesting]
+	}
+	get bpInts(): number {
+		return Math.max(this.intLocalCount - this.intRegisters.length, 0)
+	}
+	get bpFloats(): number {
+		return Math.max(this.floatLocalCount - FLOAT_GENERAL_REGISTERS.length, 0)
+	}
+	get stackLocals(): number {
+		return this.bpInts + this.bpFloats
+	}
 	get usesBP(): boolean {
-		return this.resolveLocal(this.locals - 1) instanceof BPRelative
+		return !!this.stackLocals
 	}
 }
 
-function executePush(context: CompilationContext, output: asm.AssemblyInstruction[], source: asm.Register) {
-	const target = context.resolvePush()
-	output.push(target
-		? new asm.MoveInstruction(
-				{type: 'register', register: source},
-				{type: 'register', register: target}
-			)
-		: new asm.PushInstruction(source)
-	)
-}
-function unwindStack(stackHeight: number, context: CompilationContext, output: asm.AssemblyInstruction[]) {
+function unwindStack(
+	intStackHeight: number,
+	floatStackHeight: number,
+	context: CompilationContext,
+	output: asm.AssemblyInstruction[]
+) {
 	let popCount = 0
-	while (context.stackHeight > stackHeight) {
+	while (
+		context.getStackHeight(false) > intStackHeight ||
+		context.getStackHeight(true) > floatStackHeight
+	) {
 		if (!context.resolvePop()) popCount++
 	}
 	if (popCount) {
@@ -296,12 +396,12 @@ function unwindStack(stackHeight: number, context: CompilationContext, output: a
 const STACK_TOP: asm.Datum = {type: 'indirect', register: 'rsp'}
 const MMAP_SYSCALL_REGISTERS =
 	new Array<asm.Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
-	.filter(register => GENERAL_REGISTERS.includes(register))
+	.filter(register => INT_GENERAL_REGISTERS.includes(register))
 const MMAP_SYSCALL_REGISTER_SET = new Set(MMAP_SYSCALL_REGISTERS)
 const SYSCALL_DATUM: asm.Datum = {type: 'register', register: 'rax'},
 	MMAP_ADDR_DATUM = {type: 'register' as const, register: 'rdi' as const},
 	MMAP_ADDR_INTERMEDIATE: asm.Datum =
-		{type: 'register', register: INTERMEDIATE_REGISTERS[2]},
+		{type: 'register', register: INT_INTERMEDIATE_REGISTERS[2]},
 	MMAP_LENGTH_DATUM: asm.Datum = {type: 'register', register: 'rsi'},
 	MMAP_PROT_DATUM: asm.Datum = {type: 'register', register: 'rdx'},
 	MMAP_FLAGS_DATUM: asm.Datum = {type: 'register', register: 'r10'},
@@ -313,17 +413,16 @@ const PROT_READ_WRITE: asm.Datum = {type: 'immediate', value: 0x1 | 0x2}
 // MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS
 const MMAP_FLAGS: asm.Datum = {type: 'immediate', value: 0x01 | 0x10 | 0x20}
 const compareOperations = new Map<string, asm.JumpCond>([
-	['eqz', 'e'],
-	['eq', 'e'],
+	['eqz', 'e'], ['eq', 'e'],
 	['ne', 'ne'],
 	['lt_s', 'l'],
-	['lt_u', 'b'],
+	['lt_u', 'b'], ['lt', 'b'],
 	['le_s', 'le'],
-	['le_u', 'be'],
+	['le_u', 'be'], ['le', 'be'],
 	['gt_s', 'g'],
-	['gt_u', 'a'],
+	['gt_u', 'a'], ['gt', 'a'],
 	['ge_s', 'ge'],
-	['ge_u', 'ae']
+	['ge_u', 'ae'], ['ge', 'ae']
 ])
 const arithmeticOperations = new Map([
 	['add', asm.AddInstruction],
@@ -386,17 +485,12 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'block':
 		case 'loop': {
 			const {type, returns, instructions} = instruction
-			const {containingLabels, stackHeight} = context
 			const blockLabel = context.makeLabel(type.toUpperCase())
-			containingLabels.push({
-				label: blockLabel,
-				stackHeight,
-				result: returns !== 'empty'
-			})
+			context.pushLabel(blockLabel, returns)
 			if (type === 'loop') output.push(new asm.Label(blockLabel))
 			for (const instruction of instructions) compileInstruction(instruction, context, output)
 			if (type === 'block') output.push(new asm.Label(blockLabel))
-			containingLabels.pop()
+			context.popLabel()
 			break
 		}
 		case 'if': {
@@ -407,7 +501,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			if (hasElse) elseLabel = context.makeLabel('ELSE')
 			let cond = context.resolvePop()
 			if (!cond) { // cond is on the stack
-				cond = INTERMEDIATE_REGISTERS[0]
+				[cond] = INT_INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(cond))
 			}
 			const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
@@ -415,26 +509,29 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				new asm.TestInstruction(datum, datum),
 				new asm.JumpInstruction(hasElse ? elseLabel! : endLabel, 'e')
 			)
-			const {containingLabels, stackHeight} = context
-			const result = returns !== 'empty'
-			containingLabels.push({label: endLabel, stackHeight, result})
+			context.pushLabel(endLabel, returns)
+			const intStackHeight = context.getStackHeight(false),
+			      floatStackHeight = context.getStackHeight(true)
 			compileInstructions(ifInstructions, context, output)
-			containingLabels.pop()
-			unwindStack(stackHeight + Number(result), context, output)
+			const result = returns !== 'empty'
+			const targetIntStackHeight =
+				intStackHeight + Number(result && !isFloat(returns as ValueType))
+			const targetFloatStackHeight =
+				floatStackHeight + Number(result && isFloat(returns as ValueType))
+			unwindStack(targetIntStackHeight, targetFloatStackHeight, context, output)
 			if (hasElse) {
-				context.stackHeight = stackHeight
-				containingLabels.push({label: elseLabel!, stackHeight, result})
+				context.setStackHeights(intStackHeight, floatStackHeight)
 				output.push(
 					new asm.JumpInstruction(endLabel),
 					new asm.Label(elseLabel!)
 				)
 				compileInstructions(elseInstructions, context, output)
-				containingLabels.pop()
-				unwindStack(stackHeight + Number(result), context, output)
-				// In case the else block ends in an unconditional branch that avoids pushing a result
-				if (result && context.stackHeight === stackHeight) context.push()
+				unwindStack(targetIntStackHeight, targetFloatStackHeight, context, output)
 			}
+			// In case either block ends in an unconditional branch that avoids pushing a result
+			context.setStackHeights(targetIntStackHeight, targetFloatStackHeight)
 			output.push(new asm.Label(endLabel))
+			context.popLabel()
 			break
 		}
 		case 'br':
@@ -444,7 +541,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				endLabel = context.makeLabel('BR_IF_END')
 				let cond = context.resolvePop()
 				if (!cond) {
-					cond = INTERMEDIATE_REGISTERS[0]
+					[cond] = INT_INTERMEDIATE_REGISTERS
 					output.push(new asm.PopInstruction(cond))
 				}
 				const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
@@ -453,22 +550,43 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					new asm.JumpInstruction(endLabel, 'e')
 				)
 			}
-			const {containingLabels} = context
-			const {label, result, stackHeight} =
-				containingLabels[containingLabels.length - 1 - instruction.label]
-			const moveResult = result && context.stackHeight > stackHeight + 1
-			if (moveResult) {
+			const {label, intStackHeight, floatStackHeight, result} =
+				context.getNestedLabel(instruction.label)
+			let resultRegister: asm.Register | undefined
+			let float: boolean
+			if (result) {
+				float = isFloat(result)
+				if (context.getStackHeight(float) > (float ? floatStackHeight : intStackHeight) + 1) {
+					[resultRegister] =
+						float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
+				}
+			}
+			if (resultRegister) {
 				const toPop = context.resolvePop()
 				output.push(toPop
 					? new asm.MoveInstruction(
 							{type: 'register', register: toPop},
-							{type: 'register', register: INTERMEDIATE_REGISTERS[0]}
+							{type: 'register', register: resultRegister}
 						)
-					: new asm.PopInstruction(INTERMEDIATE_REGISTERS[0])
+					: new asm.PopInstruction(resultRegister)
 				)
 			}
-			unwindStack(stackHeight + Number(result), context, output)
-			if (moveResult) executePush(context, output, INTERMEDIATE_REGISTERS[0])
+			unwindStack(
+				intStackHeight + Number(result && !float!),
+				floatStackHeight + Number(result && float!),
+				context,
+				output
+			)
+			if (resultRegister) {
+				const target = context.resolvePush(float!)
+				output.push(target
+					? new asm.MoveInstruction(
+							{type: 'register', register: resultRegister},
+							{type: 'register', register: target}
+						)
+					: new asm.PushInstruction(resultRegister)
+				)
+			}
 			output.push(new asm.JumpInstruction(label))
 			if (endLabel) output.push(new asm.Label(endLabel))
 			break
@@ -482,8 +600,8 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const registersUsed = new Set(context.registersUsed())
 			const toPush: asm.Register[] = []
 			// TODO: support passing params on the stack if too many are used
-			const argRegisters = new Array<asm.Register>(params)
-			for (let i = 0; i < params; i++) {
+			const argRegisters = new Array<asm.Register>(params.length)
+			for (let i = 0; i < params.length; i++) {
 				const register = otherContext.resolveParam(i)
 				if (register instanceof BPRelative) {
 					throw new Error(`Function ${func}'s params don't fit in registers`)
@@ -530,14 +648,16 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				))
 			}
 			if (result) {
-				const pushTo = context.resolvePush()
+				const float = isFloat(result)
+				const resultRegister = float ? FLOAT_RESULT_REGISTER : INT_RESULT_REGISTER
+				const pushTo = context.resolvePush(float)
 				if (pushTo) {
 					output.push(new asm.MoveInstruction(
-						{type: 'register', register: RESULT_REGISTER},
+						{type: 'register', register: resultRegister},
 						{type: 'register', register: pushTo}
 					))
 				}
-				else output.push(new asm.PushInstruction(RESULT_REGISTER))
+				else output.push(new asm.PushInstruction(resultRegister))
 			}
 			break
 		}
@@ -552,21 +672,24 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'select': {
+			const float = context.peek()
+			const intermediateRegisters =
+				float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
 			let cond = context.resolvePop()
 			if (!cond) {
-				cond = INTERMEDIATE_REGISTERS[0]
+				cond = intermediateRegisters[0]
 				output.push(new asm.PopInstruction(cond))
 			}
 			let ifFalse = context.resolvePop()
 			if (!ifFalse) {
-				ifFalse = INTERMEDIATE_REGISTERS[1]
+				ifFalse = intermediateRegisters[1]
 				output.push(new asm.PopInstruction(ifFalse))
 			}
 			const ifFalseDatum: asm.Datum = {type: 'register', register: ifFalse}
 			let ifTrue = context.resolvePop() // also where the result will go
 			const onStack = !ifTrue
 			if (onStack) {
-				ifTrue = INTERMEDIATE_REGISTERS[2]
+				ifTrue = INT_INTERMEDIATE_REGISTERS[2]
 				output.push(new asm.PopInstruction(ifTrue))
 			}
 			const condDatum: asm.Datum = {type: 'register', register: cond, width: 'l'}
@@ -579,16 +702,19 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				)
 			)
 			if (onStack) output.push(new asm.PushInstruction(ifTrue!))
-			context.push()
+			context.push(float)
 			break
 		}
 		case 'get_local': {
 			const {local} = instruction
+			const {float} = context.getParam(local)
 			const resolvedLocal = context.resolveParam(local)
-			let target = context.resolvePush()
+			let target = context.resolvePush(float)
 			if (resolvedLocal instanceof BPRelative) {
 				const push = !target
-				if (push) target = INTERMEDIATE_REGISTERS[0]
+				if (push) {
+					[target] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
+				}
 				output.push(new asm.MoveInstruction(
 					resolvedLocal.datum,
 					{type: 'register', register: target!}
@@ -609,10 +735,13 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'set_local':
 		case 'tee_local': {
 			const {type, local} = instruction
+			const {float} = context.getParam(local)
+			const intermediateRegisters =
+				float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
 			const tee = type === 'tee_local'
 			let value = context.resolvePop()
 			if (!value) {
-				[value] = INTERMEDIATE_REGISTERS
+				[value] = intermediateRegisters
 				output.push(tee
 					? new asm.MoveInstruction(STACK_TOP, {type: 'register', register: value})
 					: new asm.PopInstruction(value)
@@ -622,42 +751,52 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				{type: 'register', register: value!},
 				context.resolveParamDatum(local)
 			))
-			if (tee) context.push()
+			if (tee) context.push(float)
 			break
 		}
 		case 'get_global': {
 			const {global} = instruction
-			const width = context.moduleContext.resolveGlobalWidth(global)
-			let target = context.resolvePush()
+			const type = context.moduleContext.resolveGlobalType(global)
+			const float = isFloat(type)
+			let target = context.resolvePush(float)
 			const push = !target
-			if (push) target = INTERMEDIATE_REGISTERS[0]
+			if (push) {
+				[target] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
+			}
+			const width = typeWidth(type)
 			output.push(new asm.MoveInstruction(
 				{type: 'label', label: context.moduleContext.resolveGlobalLabel(global)},
-				{type: 'register', register: target!, width}
+				{type: 'register', register: target!, width},
+				width
 			))
 			if (push) output.push(new asm.PushInstruction(target!))
 			break
 		}
 		case 'set_global': {
 			const {global} = instruction
-			const width = context.moduleContext.resolveGlobalWidth(global)
+			const type = context.moduleContext.resolveGlobalType(global)
+			const float = isFloat(type)
 			let value = context.resolvePop()
 			if (!value) {
-				value = INTERMEDIATE_REGISTERS[0]
+				[value] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(value))
 			}
+			const width = typeWidth(type)
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value, width},
-				{type: 'label', label: context.moduleContext.resolveGlobalLabel(global)}
+				{type: 'label', label: context.moduleContext.resolveGlobalLabel(global)},
+				width
 			))
 			break
 		}
 		case 'i32.load':
+		case 'i64.load':
+		case 'f32.load':
+		case 'f64.load':
 		case 'i32.load8_s':
 		case 'i32.load8_u':
 		case 'i32.load16_s':
 		case 'i32.load16_u':
-		case 'i64.load':
 		case 'i64.load8_s':
 		case 'i64.load8_u':
 		case 'i64.load16_s':
@@ -665,25 +804,32 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.load32_s':
 		case 'i64.load32_u': {
 			const {offset} = instruction.access
-			let register = context.resolvePop()
-			const onStack = !register
-			if (!register) {
-				register = INTERMEDIATE_REGISTERS[0]
-				output.push(new asm.PopInstruction(register))
+			let index = context.resolvePop()
+			if (!index) {
+				index = INT_INTERMEDIATE_REGISTERS[0]
+				output.push(new asm.PopInstruction(index))
 			}
-			const address: asm.Datum = {type: 'register', register: INTERMEDIATE_REGISTERS[1]}
+			const address: asm.Datum =
+				{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1]}
 			output.push(new asm.MoveInstruction(
 				{type: 'immediate', value: context.moduleContext.memoryStart + offset},
 				address
 			))
 			const source: asm.Datum =
-				{type: 'indirect', register: address.register, offset: {register}}
-			const [type, operation] = instruction.type.split('.')
+				{type: 'indirect', register: address.register, offset: {register: index}}
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const isLoad32U = operation === 'load32_u'
-			const width = type === 'i32' || isLoad32U ? 'l' : 'q'
-			const targetDatum: asm.Datum = {type: 'register', register, width}
+			const width = isLoad32U ? 'l' : typeWidth(type)
+			const float = isFloat(type)
+			let target = context.resolvePush(float)
+			const toPush = !target
+			if (toPush) {
+				[target] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
+			}
+			const targetDatum: asm.Datum =
+				{type: 'register', register: target!, width}
 			output.push(operation === 'load' || isLoad32U
-				? new asm.MoveInstruction(source, targetDatum)
+				? new asm.MoveInstruction(source, targetDatum, width)
 				: new asm.MoveExtendInstruction(
 						source,
 						targetDatum,
@@ -695,47 +841,52 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 						}
 					)
 			)
-			if (onStack) output.push(new asm.PushInstruction(register))
-			context.push()
+			if (toPush) output.push(new asm.PushInstruction(target!))
 			break
 		}
 		case 'i32.store':
+		case 'i64.store':
+		case 'f32.store':
+		case 'f64.store':
 		case 'i32.store8':
 		case 'i32.store16':
 		case 'i64.store8':
 		case 'i64.store16':
-		case 'i64.store32':
-		case 'i64.store': {
+		case 'i64.store32': {
 			const {offset} = instruction.access
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
+			const float = isFloat(type)
 			let value = context.resolvePop()
 			if (!value) {
-				value = INTERMEDIATE_REGISTERS[0]
+				[value] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(value))
 			}
 			let index = context.resolvePop()
 			if (!index) {
-				index = INTERMEDIATE_REGISTERS[1]
+				index = INT_INTERMEDIATE_REGISTERS[1]
 				output.push(new asm.PopInstruction(index))
 			}
-			const address: asm.Datum = {type: 'register', register: INTERMEDIATE_REGISTERS[2]}
+			const address: asm.Datum =
+				{type: 'register', register: INT_INTERMEDIATE_REGISTERS[2]}
 			output.push(new asm.MoveInstruction(
 				{type: 'immediate', value: context.moduleContext.memoryStart + offset},
 				address
 			))
-			const [type, operation] = instruction.type.split('.')
 			const width = operation === 'store8' ? 'b' :
 				operation === 'store16' ? 'w' :
-				operation === 'store32' || type === 'i32' ? 'l' : 'q'
+				operation === 'store32' ? 'l' :
+				typeWidth(type)
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value, width},
-				{type: 'indirect', register: address.register, offset: {register: index}}
+				{type: 'indirect', register: address.register, offset: {register: index}},
+				width
 			))
 			break
 		}
 		case 'memory.size': {
-			let target = context.resolvePush()
+			let target = context.resolvePush(false)
 			const push = !target
-			if (push) target = INTERMEDIATE_REGISTERS[0]
+			if (push) [target] = INT_INTERMEDIATE_REGISTERS
 			output.push(new asm.MoveInstruction(
 				{type: 'label', label: context.moduleContext.memorySizeLabel},
 				{type: 'register', register: target!}
@@ -746,7 +897,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'memory.grow': {
 			let pages = context.resolvePop()
 			if (!pages || MMAP_SYSCALL_REGISTER_SET.has(pages)) {
-				const newPages = INTERMEDIATE_REGISTERS[1]
+				const newPages = INT_INTERMEDIATE_REGISTERS[1]
 				output.push(pages
 					? new asm.MoveInstruction(
 							{type: 'register', register: pages},
@@ -788,9 +939,9 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				new asm.PopInstruction(pages)
 			)
 			for (const register of reverse(toRestore)) output.push(new asm.PopInstruction(register))
-			let target = context.resolvePush()
+			let target = context.resolvePush(false)
 			const push = !target
-			if (push) [target] = INTERMEDIATE_REGISTERS
+			if (push) [target] = INT_INTERMEDIATE_REGISTERS
 			output.push(
 				new asm.MoveInstruction(sizeLabel, {type: 'register', register: target!, width: 'l'}),
 				new asm.AddInstruction({type: 'register', register: pages, width: 'l'}, sizeLabel)
@@ -800,21 +951,40 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'i32.const':
-		case 'i64.const': {
-			const {value} = instruction
-			let target = context.resolvePush()
-			const pushResult = !target
-			if (pushResult) target = INTERMEDIATE_REGISTERS[0]
-			const type = instruction.type.slice(0, instruction.type.indexOf('.'))
-			output.push(new asm.MoveInstruction(
-				{type: 'immediate', value},
-				{
-					type: 'register',
-					register: target!,
-					width: typeWidth(type as ValueType)
+		case 'i64.const':
+		case 'f32.const':
+		case 'f64.const': {
+			const [type] = instruction.type.split('.') as [ValueType, string]
+			let {value} = instruction
+			// Immediates cannot be loaded directly into SIMD registers
+			const float = isFloat(type)
+			if (float) {
+				const double = type === 'f64'
+				const dataView = new DataView(new ArrayBuffer(double ? 8 : 4))
+				if (double) dataView.setFloat64(0, value as number, true)
+				else dataView.setFloat32(0, value as number, true)
+				value = double ? dataView.getBigInt64(0, true) : dataView.getInt32(0, true)
+			}
+			const target = context.resolvePush(float)
+			const intermediate = !target || float
+				? INT_INTERMEDIATE_REGISTERS[0]
+				: target
+			const intermediateDatum: asm.Datum = {
+				type: 'register',
+				register: intermediate,
+				width: type.endsWith('32') ? 'l' : 'q'
+			}
+			output.push(
+				new asm.MoveInstruction({type: 'immediate', value}, intermediateDatum)
+			)
+			if (target) {
+				if (float) {
+					output.push(new asm.MoveInstruction(
+						intermediateDatum, {type: 'register', register: target}, 'q'
+					))
 				}
-			))
-			if (pushResult) output.push(new asm.PushInstruction(target!))
+			}
+			else output.push(new asm.PushInstruction(intermediate))
 			break
 		}
 		case 'i32.eqz':
@@ -838,41 +1008,52 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.gt_s':
 		case 'i64.gt_u':
 		case 'i64.ge_s':
-		case 'i64.ge_u': {
-			const [type, operation] = instruction.type.split('.')
-			const width = typeWidth(type as ValueType)
+		case 'i64.ge_u':
+		case 'f32.eq':
+		case 'f32.ne':
+		case 'f32.lt':
+		case 'f32.gt':
+		case 'f32.le':
+		case 'f32.ge':
+		case 'f64.eq':
+		case 'f64.ne':
+		case 'f64.lt':
+		case 'f64.gt':
+		case 'f64.le':
+		case 'f64.ge': {
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
+			const width = typeWidth(type)
+			const float = isFloat(type)
 			let datum2: asm.Datum
 			if (operation === 'eqz') datum2 = {type: 'immediate', value: 0}
 			else {
 				let arg2 = context.resolvePop()
 				if (!arg2) {
-					[arg2] = INTERMEDIATE_REGISTERS
+					[arg2] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
 					output.push(new asm.PopInstruction(arg2))
 				}
 				datum2 = {type: 'register', register: arg2, width}
 			}
 			const arg1 = context.resolvePop()
-			let datum1: asm.Datum, resultRegister: asm.Register
-			if (arg1) {
-				datum1 = {type: 'register', register: arg1, width}
-				resultRegister = arg1
-			}
-			else {
-				datum1 = STACK_TOP
-				;[resultRegister] = INTERMEDIATE_REGISTERS
+			const datum1: asm.Datum = arg1
+				? {type: 'register', register: arg1, width}
+				: STACK_TOP
+			let resultRegister = context.resolvePush(false)
+			const toPush = !resultRegister
+			if (toPush) {
+				[resultRegister] = INT_INTERMEDIATE_REGISTERS
 			}
 			const cond = compareOperations.get(operation)
 			if (!cond) throw new Error(`No comparison value found for ${instruction.type}`)
 			const result8: asm.Datum =
-				{type: 'register', register: resultRegister, width: 'b'}
+				{type: 'register', register: resultRegister!, width: 'b'}
 			const result32: asm.Datum = {...result8, width: 'l'}
 			output.push(
 				new asm.CmpInstruction(datum2, datum1, width),
 				new asm.SetInstruction(result8, cond),
 				new asm.MoveExtendInstruction(result8, result32, false)
 			)
-			context.push()
-			if (!arg1) output.push(new asm.MoveInstruction(result32, STACK_TOP))
+			if (toPush) output.push(new asm.MoveInstruction(result32, STACK_TOP))
 			break
 		}
 		case 'i32.clz':
@@ -881,24 +1062,24 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.clz':
 		case 'i64.ctz':
 		case 'i64.popcnt': {
-			const arg = context.resolvePop()
-			const [type, operation] = instruction.type.split('.')
-			const width = type === 'i32' ? 'l' : 'q'
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
+			const width = typeWidth(type)
 			const asmInstruction = bitCountOperations.get(operation)
 			if (!asmInstruction) throw new Error('No instruction found for ' + instruction.type)
+			const arg = context.resolvePop()
 			if (arg) {
 				const datum: asm.Datum = {type: 'register', register: arg, width}
 				output.push(new asmInstruction(datum, datum))
 			}
 			else {
 				const result: asm.Datum =
-					{type: 'register', register: INTERMEDIATE_REGISTERS[0], width}
+					{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0], width}
 				output.push(
 					new asmInstruction(STACK_TOP, result),
 					new asm.MoveInstruction(result, STACK_TOP)
 				)
 			}
-			context.push()
+			context.push(false)
 			break
 		}
 		case 'i32.add':
@@ -921,17 +1102,21 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.shr_u':
 		case 'i64.rotl':
 		case 'i64.rotr': {
+			// TODO: support f32/f64 instructions
 			let operand2 = context.resolvePop()
 			if (!operand2) {
-				operand2 = INTERMEDIATE_REGISTERS[1]
+				// Using intermediate register 1 instead of 0 to avoid extra mov for shifts
+				operand2 = INT_INTERMEDIATE_REGISTERS[1]
 				output.push(new asm.PopInstruction(operand2))
 			}
 			const operand1 = context.resolvePop()
-			const [type, operation] = instruction.type.split('.')
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const shift = SHIFT_OPERATIONS.has(operation)
 			const arithmeticInstruction = arithmeticOperations.get(operation)
-			if (!arithmeticInstruction) throw new Error('No arithmetic instruction found for ' + instruction.type)
-			const width = typeWidth(type as ValueType)
+			if (!arithmeticInstruction) {
+				throw new Error('No arithmetic instruction found for ' + instruction.type)
+			}
+			const width = typeWidth(type)
 			let datum2: asm.Datum = {type: 'register', register: operand2}
 			if (shift) {
 				if (operand2 !== SHIFT_REGISTER) {
@@ -947,7 +1132,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					: STACK_TOP,
 				width
 			))
-			context.push()
+			context.push(false)
 			break
 		}
 		case 'i32.mul':
@@ -965,7 +1150,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			}
 			else {
 				if (!operand2) {
-					[operand2] = INTERMEDIATE_REGISTERS
+					[operand2] = INT_INTERMEDIATE_REGISTERS
 					output.push(new asm.PopInstruction(operand2))
 				}
 				const datum2: asm.Datum = {type: 'register', register: operand2, width}
@@ -974,7 +1159,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					new asm.MoveInstruction(datum2, STACK_TOP)
 				)
 			}
-			context.push()
+			context.push(false)
 			break
 		}
 		case 'i32.div_s':
@@ -1003,7 +1188,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				// is 0 but the quotient (INT_MAX + 1) won't fit.
 				// So, if the divisor is -1, set it to 1.
 				const oneRegister: asm.Datum =
-					{type: 'register', register: INTERMEDIATE_REGISTERS[1], width}
+					{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1], width}
 				output.push(
 					new asm.MoveInstruction({type: 'immediate', value: 1}, oneRegister),
 					new asm.CmpInstruction({type: 'immediate', value: -1}, datum2, width),
@@ -1023,19 +1208,19 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			if (result.register !== datum1.register) {
 				output.push(new asm.MoveInstruction(result, datum1))
 			}
-			context.resolvePush()
+			context.resolvePush(false)
 			break
 		}
 		case 'i32.wrap': {
 			let value = context.resolvePop()
 			const onStack = !value
 			if (onStack) {
-				[value] = INTERMEDIATE_REGISTERS
+				[value] = INT_INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(value))
 			}
 			const register: asm.Datum = {type: 'register', register: value!, width: 'l'}
 			output.push(new asm.MoveInstruction(register, register))
-			context.push()
+			context.push(false)
 			if (onStack) output.push(new asm.PushInstruction(value!))
 			break
 		}
@@ -1043,7 +1228,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			let value = context.resolvePop()
 			const onStack = !value
 			if (onStack) {
-				[value] = INTERMEDIATE_REGISTERS
+				[value] = INT_INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(value))
 			}
 			output.push(new asm.MoveExtendInstruction(
@@ -1051,7 +1236,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				{type: 'register', register: value!, width: 'q'},
 				true
 			))
-			context.push()
+			context.push(false)
 			if (onStack) output.push(new asm.PushInstruction(value!))
 			break
 		}
@@ -1086,6 +1271,10 @@ interface CompiledModule {
 	instructions: asm.AssemblyInstruction[]
 	declarations: HeaderDeclaration[]
 }
+interface ParamLocation {
+	float: boolean
+	datum: asm.Datum
+}
 
 export function compileModule(
 	{module, index, moduleIndices, moduleName}: Modules
@@ -1096,7 +1285,7 @@ export function compileModule(
 	const moduleContext = new ModuleContext(index, moduleIndices)
 	const globalContext = new CompilationContext(
 		moduleContext,
-		new Map([[0, {params: [], locals: [], result: false}]]),
+		new Map([[0, {params: [], locals: []}]]),
 		0
 	)
 	let codeSection: CodeSection | undefined
@@ -1256,7 +1445,7 @@ export function compileModule(
 		functionsStats.set(i, {
 			params,
 			locals: functionsLocals[i],
-			result: !!results.length
+			result: (results as [] | [ValueType])[0]
 		})
 	}
 	const assemblySections = [
@@ -1274,34 +1463,28 @@ export function compileModule(
 		for (const register of registersUsed) {
 			saveInstructions.push(new asm.PushInstruction(register))
 		}
-		if (context.usesBP) {
-			const stackStart = context.resolveStack(0)
-			saveInstructions.push(new asm.EnterInstruction(
-				stackStart instanceof BPRelative ? stackStart.index << 3 : 0
-			))
+		const {result, usesBP} = context
+		if (usesBP) {
+			const {stackLocals} = context
+			saveInstructions.push(new asm.EnterInstruction(stackLocals << 3))
 		}
 		const returnInstructions: asm.AssemblyInstruction[] = [
 			new asm.Label(context.moduleContext.returnLabel(i))
 		]
-		if (context.result) {
-			const result = context.resolvePop()
-			returnInstructions.push(result
+		if (result) {
+			const register = context.resolvePop()
+			const resultRegister =
+				isFloat(result) ? FLOAT_RESULT_REGISTER : INT_RESULT_REGISTER
+			returnInstructions.push(register
 				? new asm.MoveInstruction(
-						{type: 'register', register: result},
-						{type: 'register', register: RESULT_REGISTER}
+						{type: 'register', register},
+						{type: 'register', register: resultRegister}
 					)
-				: new asm.PopInstruction(RESULT_REGISTER)
+				: new asm.PopInstruction(resultRegister)
 			)
 		}
-		let popCount = 0
-		while (context.stackHeight && !context.resolvePop()) popCount++
-		if (popCount) {
-			returnInstructions.push(new asm.AddInstruction(
-				{type: 'immediate', value: popCount << 3},
-				{type: 'register', register: 'rsp'}
-			))
-		}
-		if (context.usesBP) returnInstructions.push(new asm.LeaveInstruction)
+		unwindStack(0, 0, context, returnInstructions)
+		if (usesBP) returnInstructions.push(new asm.LeaveInstruction)
 		for (const register of reverse(registersUsed)) {
 			returnInstructions.push(new asm.PopInstruction(register))
 		}
@@ -1326,61 +1509,75 @@ export function compileModule(
 		labels.push(new asm.Label(functionLabel))
 		if (sysvInstructions.length) {
 			const {params} = context
-			const registerParams = Math.min(params, SYSV_PARAM_REGISTERS.length)
-			const targetMoves = new Map<asm.Register, asm.Datum>()
-			for (let param = 0; param < registerParams; param++) {
-				targetMoves.set(SYSV_PARAM_REGISTERS[param], context.resolveParamDatum(param))
+			const moves = new Map<asm.Register, ParamLocation>()
+			let intParam = 0, floatParam = 0
+			const stackParams: asm.Datum[] = []
+			for (let param = 0; param < params.length; param++) {
+				const {float} = params[param]
+				const source: asm.Register | undefined = float
+					? SYSV_FLOAT_PARAM_REGISTERS[floatParam++]
+					: SYSV_INT_PARAM_REGISTERS[intParam++]
+				const datum = context.resolveParamDatum(param)
+				if (source) moves.set(source, {float, datum})
+				else stackParams.push(datum)
 			}
-			let evicted: {register: asm.Register, inFirst: boolean} | undefined
+			let inSecond = false
+			let evicted: {original: asm.Register, current: asm.Register} | undefined
 			const toRestore: asm.Register[] = []
-			while (targetMoves.size) {
-				let source: asm.Register, target: asm.Datum, inFirst: boolean
+			while (moves.size) {
+				let source: asm.Register, target: ParamLocation
 				if (evicted) {
-					({inFirst} = evicted)
-					source = INTERMEDIATE_REGISTERS[Number(inFirst)]
-					const {register} = evicted
-					const maybeTarget = targetMoves.get(register)
+					const {original, current} = evicted
+					source = current
+					const maybeTarget = moves.get(original)
 					if (!maybeTarget) throw new Error('Expected a parameter target')
 					target = maybeTarget
-					targetMoves.delete(register)
+					moves.delete(original)
 				}
 				else {
-					[source, target] = targetMoves.entries().next().value
-					targetMoves.delete(source)
-					inFirst = false
+					[source, target] = moves.entries().next().value
+					moves.delete(source)
 				}
-				if (target.type === 'register' && targetMoves.has(target.register)) {
-					const newEvicted = target.register
-					const newInFirst = !inFirst
-					evicted = {register: newEvicted, inFirst: newInFirst}
-					sysvInstructions.push(new asm.MoveInstruction(
-						target,
-						{type: 'register', register: INTERMEDIATE_REGISTERS[Number(newInFirst)]}
-					))
-				}
-				else evicted = undefined
-				if (target.type === 'register') {
-					const {register} = target
-					if (SYSV_CALLEE_SAVE_REGISTERS.includes(register)) {
+				evicted = undefined
+				const {float, datum} = target
+				if (datum.type === 'register') {
+					const {register} = datum
+					if (moves.has(register)) {
+						const evictTo =
+							(float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS)
+							[Number(inSecond)]
+						inSecond = !inSecond
+						evicted = {original: register, current: evictTo}
+						sysvInstructions.push(
+							new asm.MoveInstruction(datum, {type: 'register', register: evictTo})
+						)
+					}
+					else if (SYSV_CALLEE_SAVE_REGISTERS.includes(register)) {
 						toRestore.push(register)
 						sysvInstructions.push(new asm.PushInstruction(register))
 					}
 				}
-				if (target.type !== 'register' || target.register !== source) {
+				if (datum.type !== 'register' || datum.register !== source) {
 					sysvInstructions.push(
-						new asm.MoveInstruction({type: 'register', register: source}, target)
+						new asm.MoveInstruction({type: 'register', register: source}, datum)
 					)
 				}
 			}
-			for (let param = registerParams; param < params; param++) {
-				const target = context.resolveParamDatum(param)
-				const register = target.type === 'register'
-					? target.register
-					: INTERMEDIATE_REGISTERS[0]
+			for (const datum of stackParams) {
+				let register: asm.Register
+				let intermediate: boolean
+				if (datum.type === 'register') {
+					({register} = datum)
+					intermediate = false
+				}
+				else {
+					[register] = INT_INTERMEDIATE_REGISTERS // can't move directly to SIMD
+					intermediate = true
+				}
 				sysvInstructions.push(new asm.PopInstruction(register))
-				if (target.type !== 'register') {
+				if (intermediate) {
 					sysvInstructions.push(
-						new asm.MoveInstruction({type: 'register', register}, target)
+						new asm.MoveInstruction({type: 'register', register}, datum, 'q')
 					)
 				}
 			}

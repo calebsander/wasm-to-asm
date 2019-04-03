@@ -3,9 +3,11 @@ export type Register
 	| 'rsp' | 'rbp'
 	| 'rdi' | 'rsi'
 	| 'r8' | 'r9' | 'r10' | 'r11' | 'r12' | 'r13' | 'r14' | 'r15'
+	| 'xmm0' | 'xmm1' | 'xmm2' | 'xmm3' | 'xmm4' | 'xmm5' | 'xmm6' | 'xmm7'
+	| 'xmm8' | 'xmm9' | 'xmm10' | 'xmm11' | 'xmm12' | 'xmm13' | 'xmm14' | 'xmm15'
 const LETTER_REGISTERS = new Set<Register>(['rax', 'rbx', 'rcx', 'rdx'])
 const X64_REGISTERS = new Set<Register>(['r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'])
-export type Width = 'b' | 'w' | 'l' | 'q'
+export type Width = 'b' | 'w' | 'l' | 'q' | 's' | 'd'
 export interface Offset {
 	register: Register
 	scale?: number
@@ -15,6 +17,7 @@ export type Datum
 	| {type: 'indirect', register: Register, immediate?: number | bigint, offset?: Offset}
 	| {type: 'label', label: string}
 	| {type: 'immediate', value: number | bigint}
+const FLOAT_WIDTHS = new Set<Width | undefined>(['s', 'd'])
 
 export type JumpCond
 	= 'e' | 'ne'
@@ -46,6 +49,7 @@ function registerToString(register: Register, width: Width = 'q') {
 		case 'q':
 			return register
 	}
+	throw new Error('Unexpected register width: ' + width)
 }
 
 function datumToString(datum: Datum): string {
@@ -76,10 +80,17 @@ export interface AssemblyInstruction {
 }
 
 abstract class SrcDestInstruction {
-	constructor(readonly src: Datum, readonly dest: Datum, readonly width?: Width) {}
+	constructor(
+		readonly src: Datum,
+		readonly dest: Datum,
+		readonly width?: Width
+	) {}
 	abstract readonly op: string
 	get str() {
-		return `${this.op}${this.width || ''} ${datumToString(this.src)}, ${datumToString(this.dest)}`
+		const {src, dest, width, op} = this
+		return `${op}${FLOAT_WIDTHS.has(width) ? 's' : ''}${width || ''} ${
+			datumToString(src)
+		}, ${datumToString(dest)}`
 	}
 }
 abstract class FullRegisterInstruction {
@@ -126,7 +137,9 @@ export class CMoveInstruction extends SrcDestInstruction {
 	get op() { return 'cmov' + this.cond }
 }
 export class CmpInstruction extends SrcDestInstruction {
-	get op() { return 'cmp' }
+	get op() {
+		return FLOAT_WIDTHS.has(this.width) ? 'comi' : 'cmp'
+	}
 }
 export class DivInstruction {
 	constructor(
@@ -184,6 +197,7 @@ export class PopcntInstruction extends SrcDestInstruction {
 	get op() { return 'popcnt' }
 }
 // TODO: allow pushing a Datum, not just a register
+// TODO: emulate pushing and popping of floats
 export class PushInstruction extends FullRegisterInstruction {
 	get str() { return `push ${this.registerStr}` }
 }

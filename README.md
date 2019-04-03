@@ -131,10 +131,10 @@ Pretty nifty!
 ## TODO
 
 There are several features that aren't supported yet:
-- `f32` and `f64` values
 - Some int and float instructions
 - Linking multiple WebAssembly modules to each other
 - `start` functions in modules
+- Functions taking more than 13 int params or 14 float params
 
 ## Calling convention
 

@@ -69,5 +69,5 @@ export const parseVector = <A>(parser: Parser<A>) => parseAndThen(
 	parseTimes(parser)
 )
 
-const slice = (data: DataView, offset: number, length = data.byteLength - offset) =>
+const slice = (data: DataView, offset: number, length?: number) =>
 	new DataView(data.buffer, data.byteOffset + offset, length)
