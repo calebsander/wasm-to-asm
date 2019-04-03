@@ -31,7 +31,7 @@ const SYSV_FLOAT_PARAM_REGISTERS =
 const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
 	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
 const SYSV_CALLEE_SAVE_SET = new Set(SYSV_CALLEE_SAVE_REGISTERS)
-const FLOAT_INTERMEDIATE_COUNT = 2
+const FLOAT_INTERMEDIATE_COUNT = 3
 const FLOAT_INTERMEDIATE_REGISTERS = new Array(FLOAT_INTERMEDIATE_COUNT)
 	.fill(0).map((_, i) => `xmm${i}` as asm.Register)
 const [FLOAT_RESULT_REGISTER] = FLOAT_INTERMEDIATE_REGISTERS
@@ -1290,38 +1290,55 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'f32.abs':
-		case 'f32.neg': {
-			// TODO: test; also support copysign
+		case 'f32.neg':
+		case 'f32.copysign': {
 			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const width = typeWidth(type)
 			const wide = width === 'd'
 			const highBitLoadDatum: asm.Datum =
 				{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
-			if (!wide) highBitLoadDatum.width = 'l'
 			const negZeroDatum: asm.Datum =
 				{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[0]}
+			let negZero = 1n << (wide ? 63n : 31n)
+			const setSignBit = operation === 'neg'
+			if (!setSignBit) negZero ^= -1n // a bitmask to exclude the sign bit
 			output.push(
 				new asm.MoveInstruction(
-					{type: 'immediate', value: 1n << (wide ? 63n : 31n)},
-					highBitLoadDatum
+					{type: 'immediate', value: negZero},
+					{...highBitLoadDatum, width: wide ? 'q' : 'l'}
 				),
 				new asm.MoveInstruction(highBitLoadDatum, negZeroDatum, 'q')
 			)
+			let signDatum: asm.Datum | undefined
+			if (operation === 'copysign') {
+				let signOperand = context.resolvePop()
+				if (!signOperand) {
+					signOperand = FLOAT_INTERMEDIATE_REGISTERS[1]
+					output.push(new asm.PopInstruction(signOperand))
+				}
+				signDatum = {type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[2]}
+				output.push(
+					new asm.MoveInstruction(negZeroDatum, signDatum, width),
+					new asm.AndNotPackedInstruction(
+						{type: 'register', register: signOperand}, signDatum, width
+					)
+				)
+			}
 			const operand = context.resolvePop()
-			const maskInstruction = operation === 'abs'
-				? asm.AndNotPackedInstruction
-				: asm.XorPackedInstruction
-			let datum: asm.Datum | undefined
-			if (!operand) {
+			let datum: asm.Datum
+			if (operand) datum = {type: 'register', register: operand}
+			else {
 				datum = {type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[1]}
-				output.push(new asm.MoveInstruction(STACK_TOP, datum, 'q'))
+				output.push(new asm.MoveInstruction(STACK_TOP, datum, width))
 			}
-			if (operand) {
-				output.push(new maskInstruction(
-					negZeroDatum, {type: 'register', register: operand}, width
-				))
+			const maskInstruction =
+				setSignBit ? asm.XorPackedInstruction : asm.AndPackedInstruction
+			output.push(new maskInstruction(negZeroDatum, datum, width))
+			if (signDatum) {
+				// Doesn't matter whether this is OR or XOR, since bits are distinct
+				output.push(new asm.XorPackedInstruction(signDatum, datum, width))
 			}
-			if (datum) output.push(new asm.MoveInstruction(datum, STACK_TOP, 'q'))
+			if (!operand) output.push(new asm.MoveInstruction(datum, STACK_TOP, width))
 			context.push(true)
 			break
 		}

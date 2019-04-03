@@ -127,6 +127,9 @@ export class AddInstruction extends SrcDestInstruction {
 export class AndInstruction extends SrcDestInstruction {
 	get op() { return 'and' }
 }
+export class AndPackedInstruction extends AndInstruction {
+	get packed() { return true }
+}
 export class AndNotPackedInstruction extends SrcDestInstruction {
 	get op() { return 'andn' }
 	get packed() { return true }

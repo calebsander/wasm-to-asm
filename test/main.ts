@@ -6,11 +6,13 @@ import {INVALID_EXPORT_CHAR} from '../compile-code'
 import {parse, SExpression} from './parse-s'
 
 const CC = 'gcc', C_STD = '-std=c11'
+const C_NAN = 'NAN'
 const SUCCESS = 'success'
 const TESTS = [
 	'address',
 	'endianness',
 	'f32',
+	'f32_bitwise',
 	'fac',
 	'forward',
 	'i32',
@@ -70,7 +72,11 @@ function getValue({op, args}: SExpression) {
 			const [arg] = args
 			assert.equal(arg.args.length, 0)
 			let value = arg.op
-			if (value === 'inf' || value === '-inf') return value.replace('inf', 'INFINITY')
+			if (value === 'inf' || value === '-inf') {
+				return value.replace('inf', 'INFINITY')
+			}
+			if (value.startsWith('nan')) return C_NAN
+			if (value.startsWith('-nan')) return '-' + C_NAN
 
 			if (op === 'i64.const') value += 'L'
 			else if (op[0] === 'f') {
@@ -139,7 +145,7 @@ function getValue({op, args}: SExpression) {
 							`wasm_${test}_${funcNameMatch[1].replace(INVALID_EXPORT_CHAR, '_')}`
 						const functionCall = `${funcName}(${args.map(getValue).join(', ')})`
 						const value = getValue(expected)
-						cFile += value.startsWith('nan')
+						cFile += value.includes(C_NAN)
 							? `assert(isnan(${functionCall}));\n`
 							: `assert(${functionCall} == ${value});\n`
 						break

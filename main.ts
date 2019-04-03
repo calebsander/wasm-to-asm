@@ -17,7 +17,7 @@ interface ModuleFiles {
 	[module: string]: string
 }
 
-;(async () => {
+(async () => {
 	const modules = await Promise.all(process.argv.slice(2).map(async file => {
 		if (!file.endsWith(WASM_EXTENSION)) {
 			throw new Error(`File ${file} is not a .wasm file`)
