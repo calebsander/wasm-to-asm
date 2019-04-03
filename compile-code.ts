@@ -1129,11 +1129,32 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const result8: asm.Datum =
 				{type: 'register', register: resultRegister!, width: 'b'}
 			const result32: asm.Datum = {...result8, width: 'l'}
+			let parityDatum: asm.Datum,
+			    parityCond: asm.JumpCond,
+			    parityInstruction: typeof asm.OrInstruction
+			if (float) {
+				parityDatum =
+					{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1], width: 'b'}
+				if (operation === 'ne') { // negative comparison returns true on nan
+					parityCond = 'p'
+					parityInstruction = asm.OrInstruction
+				}
+				else { // positive comparison returns false on nan
+					parityCond = 'np'
+					parityInstruction = asm.AndInstruction
+				}
+			}
 			output.push(
 				new asm.CmpInstruction(datum2, datum1, width),
-				new asm.SetInstruction(result8, cond),
-				new asm.MoveExtendInstruction(result8, result32, false)
+				new asm.SetInstruction(result8, cond)
 			)
+			if (float) {
+				output.push(
+					new asm.SetInstruction(parityDatum!, parityCond!),
+					new parityInstruction!(parityDatum!, result8)
+				)
+			}
+			output.push(new asm.MoveExtendInstruction(result8, result32, false))
 			if (toPush) output.push(new asm.MoveInstruction(result32, STACK_TOP))
 			break
 		}

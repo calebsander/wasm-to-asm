@@ -13,6 +13,7 @@ const TESTS = [
 	'endianness',
 	'f32',
 	'f32_bitwise',
+	'f32_cmp',
 	'fac',
 	'forward',
 	'i32',

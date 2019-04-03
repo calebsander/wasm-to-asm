@@ -25,6 +25,7 @@ export type JumpCond
 	| 'le' | 'ge'
 	| 'a' | 'b'
 	| 'ae' | 'be'
+	| 'p' | 'np'
 
 export type GASDirective
 	= {type: 'text' | 'data', args?: void}
@@ -152,7 +153,7 @@ export class CMoveInstruction extends SrcDestInstruction {
 }
 export class CmpInstruction extends SrcDestInstruction {
 	get op() {
-		return FLOAT_WIDTHS.has(this.width) ? 'comi' : 'cmp'
+		return FLOAT_WIDTHS.has(this.width) ? 'ucomi' : 'cmp'
 	}
 }
 export class DivInstruction {
