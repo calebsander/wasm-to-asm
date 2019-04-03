@@ -32,6 +32,8 @@ export type GASDirective
 	| {type: 'long' | 'quad', args: [number]}
 	| {type: 'balign', args: [number]}
 
+const isSIMDRegister = (register: Register) => register.startsWith('xmm')
+
 function registerToString(register: Register, width: Width = 'q') {
 	switch (width) {
 		case 'b':
@@ -47,9 +49,10 @@ function registerToString(register: Register, width: Width = 'q') {
 				? register + 'd'
 				: 'e' + register.slice(1)
 		case 'q':
+		case 's':
+		case 'd':
 			return register
 	}
-	throw new Error('Unexpected register width: ' + width)
 }
 
 function datumToString(datum: Datum): string {
@@ -191,15 +194,39 @@ export class OrInstruction extends SrcDestInstruction {
 	get op() { return 'or' }
 }
 export class PopInstruction extends FullRegisterInstruction {
-	get str() { return `pop ${this.registerStr}` }
+	get str() {
+		if (isSIMDRegister(this.register)) {
+			return new MoveInstruction(
+				{type: 'indirect', register: 'rsp'},
+				{type: 'register', register: this.register},
+				'd'
+			).str + '\n' + new AddInstruction(
+				{type: 'immediate', value: 8},
+				{type: 'register', register: 'rsp'}
+			).str
+		}
+		else return 'pop ' + this.registerStr
+	}
 }
 export class PopcntInstruction extends SrcDestInstruction {
 	get op() { return 'popcnt' }
 }
 // TODO: allow pushing a Datum, not just a register
-// TODO: emulate pushing and popping of floats
 export class PushInstruction extends FullRegisterInstruction {
-	get str() { return `push ${this.registerStr}` }
+	get str() {
+		if (isSIMDRegister(this.register)) {
+			return new SubInstruction(
+				{type: 'immediate', value: 8},
+				{type: 'register', register: 'rsp'}
+			).str + '\n' +
+			new MoveInstruction(
+				{type: 'register', register: this.register},
+				{type: 'indirect', register: 'rsp'},
+				'd'
+			).str
+		}
+		else return 'push ' + this.registerStr
+	}
 }
 export class RetInstruction {
 	get str() { return 'ret' }

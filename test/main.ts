@@ -8,7 +8,8 @@ import {parse, SExpression} from './parse-s'
 const CC = 'gcc', C_STD = '-std=c11'
 const SUCCESS = 'success'
 const TESTS = [
-	// 'address', won't work until f32 and f64 support is implemented
+	'address',
+	'endianness',
 	'fac',
 	'forward',
 	'i32',
@@ -61,11 +62,23 @@ async function sha256Test() {
 function getValue({op, args}: SExpression) {
 	switch (op) {
 		case 'i32.const':
-		case 'i64.const': {
+		case 'i64.const':
+		case 'f32.const':
+		case 'f64.const': {
 			assert.equal(args.length, 1)
 			const [arg] = args
 			assert.equal(arg.args.length, 0)
-			return op === 'i32.const' ? arg.op : arg.op + 'L'
+			let value = arg.op
+			if (op === 'i64.const') value += 'L'
+			else if (op[0] === 'f') {
+				try {
+					BigInt(value)
+					value += '.'
+				}
+				catch {}
+				if (op === 'f32.const') value += 'F'
+			}
+			return value
 		}
 		default:
 			throw new Error('Unknown value type: ' + op)
@@ -93,6 +106,7 @@ function getValue({op, args}: SExpression) {
 
 			let cFile = `
 				#include <assert.h>
+				#include <math.h>
 				#include <stdio.h>
 				#include "${test}.h"
 
@@ -120,9 +134,11 @@ function getValue({op, args}: SExpression) {
 						if (!funcNameMatch) throw new Error('Not a funtion name: ' + func.op)
 						const funcName =
 							`wasm_${test}_${funcNameMatch[1].replace(INVALID_EXPORT_CHAR, '_')}`
-						cFile += `
-							assert(${funcName}(${args.map(getValue).join(', ')}) == ${getValue(expected)});
-						`
+						const functionCall = `${funcName}(${args.map(getValue).join(', ')})`
+						const value = getValue(expected)
+						cFile += value.startsWith('nan')
+							? `assert(isnan(${functionCall}));\n`
+							: `assert(${functionCall} == ${value});\n`
 						break
 					case 'assert_exhaustion':
 					case 'assert_invalid':
