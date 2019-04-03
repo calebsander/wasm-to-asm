@@ -1312,7 +1312,10 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		}
 		case 'f32.abs':
 		case 'f32.neg':
-		case 'f32.copysign': {
+		case 'f32.copysign':
+		case 'f64.abs':
+		case 'f64.neg':
+		case 'f64.copysign': {
 			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const width = typeWidth(type)
 			const wide = width === 'd'
@@ -1367,7 +1370,12 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'f32.floor':
 		case 'f32.trunc':
 		case 'f32.nearest':
-		case 'f32.sqrt': {
+		case 'f32.sqrt':
+		case 'f64.ceil':
+		case 'f64.floor':
+		case 'f64.trunc':
+		case 'f64.nearest':
+		case 'f64.sqrt': {
 			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const width = typeWidth(type)
 			const operand = context.resolvePop()
@@ -1394,7 +1402,13 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'f32.mul':
 		case 'f32.div':
 		case 'f32.min':
-		case 'f32.max': {
+		case 'f32.max':
+		case 'f64.add':
+		case 'f64.sub':
+		case 'f64.mul':
+		case 'f64.div':
+		case 'f64.min':
+		case 'f64.max': {
 			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const arithmeticInstruction = floatBinaryOperations.get(operation)
 			if (!arithmeticInstruction) {
