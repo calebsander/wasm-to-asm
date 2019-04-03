@@ -32,11 +32,10 @@ const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
 	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
 const SYSV_CALLEE_SAVE_SET = new Set(SYSV_CALLEE_SAVE_REGISTERS)
 const FLOAT_INTERMEDIATE_COUNT = 3
-const FLOAT_INTERMEDIATE_REGISTERS = new Array(FLOAT_INTERMEDIATE_COUNT)
-	.fill(0).map((_, i) => `xmm${i}` as asm.Register)
+const FLOAT_INTERMEDIATE_REGISTERS: asm.Register[] = ['xmm0', 'xmm14', 'xmm15']
 const [FLOAT_RESULT_REGISTER] = FLOAT_INTERMEDIATE_REGISTERS
 const FLOAT_GENERAL_REGISTERS = new Array(16 - FLOAT_INTERMEDIATE_COUNT)
-	.fill(0).map((_, i) => `xmm${FLOAT_INTERMEDIATE_COUNT + i}` as asm.Register)
+	.fill(0).map((_, i) => `xmm${i + 1}` as asm.Register)
 
 export const INVALID_EXPORT_CHAR = /[^A-Za-z0-9_]/g
 
@@ -394,16 +393,15 @@ function unwindStack(
 	}
 }
 function relocateArguments(
-	moves: Map<asm.Register, ParamLocation>,
+	moves: Map<asm.Register, asm.Datum>,
 	stackParams: asm.Datum[],
 	saveRegisters: Set<asm.Register>
 ) {
-	let inSecond = false
 	let evicted: {original: asm.Register, current: asm.Register} | undefined
 	const toRestore: asm.Register[] = []
 	const instructions: asm.AssemblyInstruction[] = []
 	while (moves.size) {
-		let source: asm.Register, target: ParamLocation
+		let source: asm.Register, target: asm.Datum
 		if (evicted) {
 			const {original, current} = evicted
 			source = current
@@ -416,25 +414,24 @@ function relocateArguments(
 			[source, target] = moves.entries().next().value
 			moves.delete(source)
 		}
-		evicted = undefined
-		const {float, datum} = target
-		if (datum.type === 'register') {
-			const {register} = datum
+		if (target.type === 'register') {
+			const {register} = target
 			if (moves.has(register)) {
-				const evictTo =
-					(float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS)
-					[Number(inSecond)]
-				inSecond = !inSecond
+				// %rax and %xmm14 are not used for SysV params
+				let [evictTo] = INT_INTERMEDIATE_REGISTERS
+				if (evictTo === source) evictTo = FLOAT_INTERMEDIATE_REGISTERS[1]
 				evicted = {original: register, current: evictTo}
 				instructions.push(new asm.MoveInstruction(
-					datum, {type: 'register', register: evictTo}, 'q'
+					target, {type: 'register', register: evictTo}, 'q'
 				))
 			}
-			else if (saveRegisters.has(register)) toRestore.push(register)
+			else evicted = undefined
+			if (saveRegisters.has(register)) toRestore.push(register)
 		}
-		if (datum.type !== 'register' || datum.register !== source) {
+		else evicted = undefined
+		if (!(target.type === 'register' && target.register === source)) {
 			instructions.push(new asm.MoveInstruction(
-				{type: 'register', register: source}, datum, 'q'
+				{type: 'register', register: source}, target, 'q'
 			))
 		}
 	}
@@ -683,7 +680,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			)
 			const {params, result} = otherContext
 			const registersUsed = new Set(context.registersUsed())
-			const moves = new Map<asm.Register, ParamLocation>()
+			const moves = new Map<asm.Register, asm.Datum>()
 			const stackParams: asm.Datum[] = []
 			for (let i = params.length - 1; i >= 0; i--) {
 				const source = context.resolvePop()
@@ -691,10 +688,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				const datum: asm.Datum = target instanceof BPRelative
 					? target.datum
 					: {type: 'register', register: target}
-				if (source) {
-					const {float} = otherContext.getParam(i)
-					moves.set(source, {float, datum})
-				}
+				if (source) moves.set(source, datum)
 				else stackParams.push(datum)
 			}
 			const {toRestore, instructions: relocateInstructions} =
@@ -1050,14 +1044,11 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const intermediate = !target || float
 				? INT_INTERMEDIATE_REGISTERS[0]
 				: target
-			const intermediateDatum: asm.Datum = {
-				type: 'register',
-				register: intermediate,
-				width: type.endsWith('32') ? 'l' : 'q'
-			}
-			output.push(
-				new asm.MoveInstruction({type: 'immediate', value}, intermediateDatum)
-			)
+			const intermediateDatum: asm.Datum = {type: 'register', register: intermediate}
+			output.push(new asm.MoveInstruction(
+				{type: 'immediate', value},
+				{...intermediateDatum, width: type.endsWith('32') ? 'l' : 'q'}
+			))
 			if (target) {
 				if (float) {
 					output.push(new asm.MoveInstruction(
@@ -1523,10 +1514,6 @@ interface CompiledModule {
 	instructions: asm.AssemblyInstruction[]
 	declarations: HeaderDeclaration[]
 }
-interface ParamLocation {
-	float: boolean
-	datum: asm.Datum
-}
 
 export function compileModule(
 	{module, index, moduleIndices, moduleName}: Modules
@@ -1761,7 +1748,7 @@ export function compileModule(
 		labels.push(new asm.Label(functionLabel))
 		if (sysvInstructions.length) {
 			const {params} = context
-			const moves = new Map<asm.Register, ParamLocation>()
+			const moves = new Map<asm.Register, asm.Datum>()
 			let intParam = 0, floatParam = 0
 			const stackParams: asm.Datum[] = []
 			for (let param = 0; param < params.length; param++) {
@@ -1770,7 +1757,7 @@ export function compileModule(
 					? SYSV_FLOAT_PARAM_REGISTERS[floatParam++]
 					: SYSV_INT_PARAM_REGISTERS[intParam++]
 				const datum = context.resolveParamDatum(param)
-				if (source) moves.set(source, {float, datum})
+				if (source) moves.set(source, datum)
 				else stackParams.push(datum)
 			}
 			const {toRestore, instructions} =
