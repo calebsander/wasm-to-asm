@@ -460,7 +460,7 @@ function relocateArguments(
 	return {toRestore, instructions}
 }
 
-const STACK_TOP: asm.Datum = {type: 'indirect', register: 'rsp'}
+const STACK_TOP = {type: 'indirect' as const, register: 'rsp' as asm.Register}
 const MMAP_SYSCALL_REGISTERS =
 	new Array<asm.Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
 	.filter(register => INT_GENERAL_REGISTERS.includes(register))
@@ -491,7 +491,7 @@ const compareOperations = new Map<string, asm.JumpCond>([
 	['ge_s', 'ge'],
 	['ge_u', 'ae'], ['ge', 'ae']
 ])
-const arithmeticOperations = new Map([
+const intArithmeticOperations = new Map([
 	['add', asm.AddInstruction],
 	['sub', asm.SubInstruction],
 	['and', asm.AndInstruction],
@@ -507,6 +507,20 @@ const bitCountOperations = new Map([
 	['clz', asm.LzcntInstruction],
 	['ctz', asm.TzcntInstruction],
 	['popcnt', asm.PopcntInstruction]
+])
+const floatBinaryOperations = new Map([
+	['add', asm.AddInstruction],
+	['sub', asm.SubInstruction],
+	['mul', asm.MulInstruction],
+	['div', asm.DivBinaryInstruction],
+	['min', asm.MinInstruction],
+	['max', asm.MaxInstruction]
+])
+const roundModes = new Map([
+	['nearest', 0],
+	['floor', 1],
+	['ceil', 2],
+	['trunc', 3]
 ])
 const SHIFT_OPERATIONS = new Set(['shl', 'shr_s', 'shr_u', 'rotl', 'rotr'])
 interface GlobalDirective {
@@ -1169,7 +1183,6 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i64.shr_u':
 		case 'i64.rotl':
 		case 'i64.rotr': {
-			// TODO: support f32/f64 instructions
 			let operand2 = context.resolvePop()
 			if (!operand2) {
 				// Using intermediate register 1 instead of 0 to avoid extra mov for shifts
@@ -1179,7 +1192,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const operand1 = context.resolvePop()
 			const [type, operation] = instruction.type.split('.') as [ValueType, string]
 			const shift = SHIFT_OPERATIONS.has(operation)
-			const arithmeticInstruction = arithmeticOperations.get(operation)
+			const arithmeticInstruction = intArithmeticOperations.get(operation)
 			if (!arithmeticInstruction) {
 				throw new Error('No arithmetic instruction found for ' + instruction.type)
 			}
@@ -1205,21 +1218,19 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		case 'i32.mul':
 		case 'i64.mul': {
 			let operand2 = context.resolvePop()
+			if (!operand2) {
+				[operand2] = INT_INTERMEDIATE_REGISTERS
+				output.push(new asm.PopInstruction(operand2))
+			}
 			const operand1 = context.resolvePop()
 			const width = instruction.type === 'i32.mul' ? 'l' : 'q'
 			if (operand1) {
 				output.push(new asm.ImulInstruction(
-					operand2
-						? {type: 'register', register: operand2, width}
-						: STACK_TOP,
+					{type: 'register', register: operand2, width},
 					{type: 'register', register: operand1, width}
 				))
 			}
 			else {
-				if (!operand2) {
-					[operand2] = INT_INTERMEDIATE_REGISTERS
-					output.push(new asm.PopInstruction(operand2))
-				}
 				const datum2: asm.Datum = {type: 'register', register: operand2, width}
 				output.push(
 					new asm.ImulInstruction(STACK_TOP, datum2),
@@ -1275,7 +1286,107 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			if (result.register !== datum1.register) {
 				output.push(new asm.MoveInstruction(result, datum1))
 			}
-			context.resolvePush(false)
+			context.push(false)
+			break
+		}
+		case 'f32.abs':
+		case 'f32.neg': {
+			// TODO: test; also support copysign
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
+			const width = typeWidth(type)
+			const wide = width === 'd'
+			const highBitLoadDatum: asm.Datum =
+				{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+			if (!wide) highBitLoadDatum.width = 'l'
+			const negZeroDatum: asm.Datum =
+				{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[0]}
+			output.push(
+				new asm.MoveInstruction(
+					{type: 'immediate', value: 1n << (wide ? 63n : 31n)},
+					highBitLoadDatum
+				),
+				new asm.MoveInstruction(highBitLoadDatum, negZeroDatum, 'q')
+			)
+			const operand = context.resolvePop()
+			const maskInstruction = operation === 'abs'
+				? asm.AndNotPackedInstruction
+				: asm.XorPackedInstruction
+			let datum: asm.Datum | undefined
+			if (!operand) {
+				datum = {type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[1]}
+				output.push(new asm.MoveInstruction(STACK_TOP, datum, 'q'))
+			}
+			if (operand) {
+				output.push(new maskInstruction(
+					negZeroDatum, {type: 'register', register: operand}, width
+				))
+			}
+			if (datum) output.push(new asm.MoveInstruction(datum, STACK_TOP, 'q'))
+			context.push(true)
+			break
+		}
+		case 'f32.ceil':
+		case 'f32.floor':
+		case 'f32.trunc':
+		case 'f32.nearest':
+		case 'f32.sqrt': {
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
+			const width = typeWidth(type)
+			const operand = context.resolvePop()
+			let datum: asm.Datum, result: asm.Datum
+			if (operand) datum = result = {type: 'register', register: operand}
+			else {
+				datum = STACK_TOP
+				result = {type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[0]}
+			}
+			if (operation === 'sqrt') {
+				output.push(new asm.SqrtInstruction(datum, result, width))
+			}
+			else {
+				const mode = roundModes.get(operation)
+				if (mode === undefined) throw new Error('Unknown round type: ' + operation)
+				output.push(new asm.RoundInstruction(mode, datum, result, width))
+			}
+			if (!operand) output.push(new asm.MoveInstruction(result, STACK_TOP, 'q'))
+			context.push(true)
+			break
+		}
+		case 'f32.add':
+		case 'f32.sub':
+		case 'f32.mul':
+		case 'f32.div':
+		case 'f32.min':
+		case 'f32.max': {
+			const [type, operation] = instruction.type.split('.') as [ValueType, string]
+			const arithmeticInstruction = floatBinaryOperations.get(operation)
+			if (!arithmeticInstruction) {
+				throw new Error('No arithmetic instruction found for ' + instruction.type)
+			}
+			const width = typeWidth(type)
+			const operand2 = context.resolvePop()
+			let operand1 = context.resolvePop()
+			const onStack = !operand1
+			if (onStack) {
+				[operand1] = FLOAT_INTERMEDIATE_REGISTERS
+				output.push(new asm.MoveInstruction(
+					{...STACK_TOP, immediate: 8}, {type: 'register', register: operand1}, 'q'
+				))
+			}
+			const datum1: asm.Datum = {type: 'register', register: operand1!}
+			output.push(new arithmeticInstruction(
+				operand2 ? {type: 'register', register: operand2} : STACK_TOP,
+				datum1,
+				width
+			))
+			if (!operand2) {
+				output.push(new asm.AddInstruction(
+					{type: 'immediate', value: 8}, {type: 'register', register: 'rsp'}
+				))
+			}
+			context.push(true)
+			if (onStack) {
+				output.push(new asm.MoveInstruction(datum1, STACK_TOP, 'q'))
+			}
 			break
 		}
 		case 'i32.wrap': {

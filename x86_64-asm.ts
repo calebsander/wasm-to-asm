@@ -89,9 +89,13 @@ abstract class SrcDestInstruction {
 		readonly width?: Width
 	) {}
 	abstract readonly op: string
+	get packed() { return false }
 	get str() {
 		const {src, dest, width, op} = this
-		return `${op}${FLOAT_WIDTHS.has(width) ? 's' : ''}${width || ''} ${
+		const simdExtension = FLOAT_WIDTHS.has(width)
+			? this.packed ? 'p' : 's'
+			: ''
+		return `${op}${simdExtension}${width || ''} ${
 			datumToString(src)
 		}, ${datumToString(dest)}`
 	}
@@ -122,6 +126,10 @@ export class AddInstruction extends SrcDestInstruction {
 }
 export class AndInstruction extends SrcDestInstruction {
 	get op() { return 'and' }
+}
+export class AndNotPackedInstruction extends SrcDestInstruction {
+	get op() { return 'andn' }
+	get packed() { return true }
 }
 export class CallInstruction {
 	constructor(readonly target: string) {}
@@ -154,9 +162,15 @@ export class DivInstruction {
 		return `${this.signed ? 'i' : ''}div${this.width} ${datumToString(this.src)}`
 	}
 }
+export class DivBinaryInstruction extends SrcDestInstruction {
+	get op() { return 'div' }
+}
 export class EnterInstruction {
 	constructor(readonly frameSize: number) {}
 	get str() { return `enter $${this.frameSize}, $0` }
+}
+export class ImulInstruction extends SrcDestInstruction {
+	get op() { return 'imul' }
 }
 export class JumpInstruction {
 	constructor(readonly target: string, readonly cond?: JumpCond) {}
@@ -167,6 +181,12 @@ export class LeaveInstruction {
 }
 export class LzcntInstruction extends SrcDestInstruction {
 	get op() { return 'lzcnt' }
+}
+export class MaxInstruction extends SrcDestInstruction {
+	get op() { return 'max' }
+}
+export class MinInstruction extends SrcDestInstruction {
+	get op() { return 'min' }
 }
 export class MoveInstruction extends SrcDestInstruction {
 	get op() { return 'mov' }
@@ -187,8 +207,8 @@ export class MoveExtendInstruction extends SrcDestInstruction {
 		return movPrefix + 'x'
 	}
 }
-export class ImulInstruction extends SrcDestInstruction {
-	get op() { return 'imul' }
+export class MulInstruction extends SrcDestInstruction {
+	get op() { return 'mul' }
 }
 export class OrInstruction extends SrcDestInstruction {
 	get op() { return 'or' }
@@ -237,6 +257,13 @@ export class RolInstruction extends SrcDestInstruction {
 export class RorInstruction extends SrcDestInstruction {
 	get op() { return 'ror' }
 }
+export class RoundInstruction extends SrcDestInstruction {
+	constructor(mode: number, src: Datum, readonly dest: Datum, width: Width) {
+		super({type: 'immediate', value: mode}, src, width)
+	}
+	get op() { return 'round' }
+	get str() { return `${super.str}, ${datumToString(this.dest)}` }
+}
 export class SarInstruction extends SrcDestInstruction {
 	get op() { return 'sar' }
 }
@@ -249,6 +276,9 @@ export class ShlInstruction extends SrcDestInstruction {
 }
 export class ShrInstruction extends SrcDestInstruction {
 	get op() { return 'shr' }
+}
+export class SqrtInstruction extends SrcDestInstruction {
+	get op() { return 'sqrt' }
 }
 export class SubInstruction extends SrcDestInstruction {
 	get op() { return 'sub' }
@@ -264,6 +294,9 @@ export class TzcntInstruction extends SrcDestInstruction {
 }
 export class XorInstruction extends SrcDestInstruction {
 	get op() { return 'xor' }
+}
+export class XorPackedInstruction extends XorInstruction {
+	get packed() { return true }
 }
 
 export const SYSCALL = {

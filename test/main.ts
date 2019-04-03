@@ -10,6 +10,7 @@ const SUCCESS = 'success'
 const TESTS = [
 	'address',
 	'endianness',
+	'f32',
 	'fac',
 	'forward',
 	'i32',
@@ -69,6 +70,8 @@ function getValue({op, args}: SExpression) {
 			const [arg] = args
 			assert.equal(arg.args.length, 0)
 			let value = arg.op
+			if (value === 'inf' || value === '-inf') return value.replace('inf', 'INFINITY')
+
 			if (op === 'i64.const') value += 'L'
 			else if (op[0] === 'f') {
 				try {
@@ -143,6 +146,8 @@ function getValue({op, args}: SExpression) {
 					case 'assert_exhaustion':
 					case 'assert_invalid':
 					case 'assert_malformed':
+					case 'assert_return_arithmetic_nan':
+					case 'assert_return_canonical_nan':
 					case 'assert_trap':
 						processed = false
 						break
