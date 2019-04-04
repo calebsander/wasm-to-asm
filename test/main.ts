@@ -1,4 +1,3 @@
-import {strict as assert} from 'assert'
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import {promisify} from 'util'
@@ -19,6 +18,7 @@ const TESTS = [
 	'f64_cmp',
 	'fac',
 	'float_exprs',
+	'float_misc',
 	'forward',
 	'i32',
 	'i64',
@@ -68,16 +68,21 @@ async function sha256Test() {
 	return {test, testCount: 1}
 }
 
-function getValue({op, args}: SExpression) {
+function getValue(expression: SExpression) {
+	if (expression.type === 'atom') {
+		throw new Error('Invalid expression: ' + JSON.stringify(expression))
+	}
+	let [op, value] = expression.items.map(item => {
+		if (item.type !== 'atom') {
+			throw new Error('Invalid expression: ' + JSON.stringify(expression))
+		}
+		return item.atom
+	})
 	switch (op) {
 		case 'i32.const':
 		case 'i64.const':
 		case 'f32.const':
 		case 'f64.const': {
-			assert.equal(args.length, 1)
-			const [arg] = args
-			assert.equal(arg.args.length, 0)
-			let value = arg.op
 			if (value === 'inf' || value === '-inf') {
 				return value.replace('inf', 'INFINITY')
 			}
@@ -137,23 +142,30 @@ function getValue({op, args}: SExpression) {
 			let asserts = nextModule < 0
 				? testFile.slice(assertsStart)
 				: testFile.slice(assertsStart, nextModule)
-			while ((assertStartMatch = TESTS_START.exec(asserts)) && !assertStartMatch.index) {
+			makeTests: while (assertStartMatch = TESTS_START.exec(asserts)) {
 				const {result, rest} = parse(asserts)
+				if (result.type === 'atom') throw new Error('Not a test: ' + JSON.stringify(result))
+				const [op, ...args] = result.items
+				if (op.type !== 'atom') throw new Error('Not a test: ' + JSON.stringify(result))
 				let processed = true
-				switch (result.op) {
+				switch (op.atom) {
+					case 'module':
+						break makeTests
 					case 'assert_return':
 					case 'invoke':
 						let invoke: SExpression, expected: SExpression | undefined
-						if (result.op === 'invoke') invoke = result
-						else [invoke, expected] = result.args as [SExpression, SExpression?]
-						assert.equal(invoke.op, 'invoke')
-						const [func, ...args] = invoke.args
-						assert.equal(func.args.length, 0)
-						const funcNameMatch = FUNC_NAME.exec(func.op)
-						if (!funcNameMatch) throw new Error('Not a funtion name: ' + func.op)
+						if (op.atom === 'invoke') invoke = result
+						else [invoke, expected] = args as [SExpression, SExpression?]
+						if (invoke.type === 'atom') throw new Error('Expected an invocation')
+						const [invokeOp, func, ...funcArgs] = invoke.items
+						if (!(invokeOp.type === 'atom' && invokeOp.atom === 'invoke') || func.type === 'list') {
+							throw new Error('Expected an invocation')
+						}
+						const funcNameMatch = FUNC_NAME.exec(func.atom)
+						if (!funcNameMatch) throw new Error('Not a function name: ' + func.atom)
 						const funcName =
 							`wasm_${test}_${funcNameMatch[1].replace(INVALID_EXPORT_CHAR, '_')}`
-						const functionCall = `${funcName}(${args.map(getValue).join(', ')})`
+						const functionCall = `${funcName}(${funcArgs.map(getValue).join(', ')})`
 						if (expected) {
 							const value = getValue(expected)
 							cFile += value.includes(C_NAN)
@@ -171,10 +183,10 @@ function getValue({op, args}: SExpression) {
 						processed = false
 						break
 					default:
-						throw new Error('Unknown assertion type: ' + result.op)
+						throw new Error('Unknown assertion type: ' + op.atom)
 				}
 				if (processed) testCount++
-				asserts = rest.trim()
+				asserts = rest
 			}
 			cFile += `
 					printf("${SUCCESS}");

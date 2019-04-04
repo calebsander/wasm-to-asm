@@ -128,7 +128,7 @@ Pretty nifty!
 ## TODO
 
 There are several features that aren't supported yet:
-- Some int and float instructions
+- `br_table` and `call_indirect` instructions
 - Linking multiple WebAssembly modules to each other
 - `start` functions in modules
 - Functions taking more than 13 int params or 14 float params

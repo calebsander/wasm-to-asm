@@ -1,47 +1,49 @@
 const WHITESPACE = /\s/
 
-export interface SExpression {
-	op: string
-	args: SExpression[]
-}
-interface ParseResult {
-	result: SExpression
+export type SExpression
+	= {type: 'atom', atom: string}
+	| {type: 'list', items: SExpression[]}
+export interface ParseResult<T> {
+	result: T
 	rest: string
 }
 
-export function parse(text: string): ParseResult {
+function parseSpace(text: string): string {
 	let i = 0
-	if (text.slice(0, 2) == ';;') {
-		for (i = 2; text[i] !== '\n'; i++);
-		while (WHITESPACE.test(text[++i]));
-	}
-
-	if (text[i] === '(') {
-		while (WHITESPACE.test(text[++i]));
-		const opStart = i
-		while (!(text[i] === ')' || WHITESPACE.test(text[i]))) i++
-		const op = text.slice(opStart, i)
-		const args: SExpression[] = []
-		text = text.slice(i)
-		while (true) {
-			i = 0
-			while (WHITESPACE.test(text[i])) i++
-			if (text[i] === ')') break
-
-			const {result, rest} = parse(text.slice(i))
-			args.push(result)
-			text = rest
+	while (true) {
+		if (text[i] === ';') {
+			while (text[++i] !== '\n');
 		}
-		return {result: {op, args}, rest: text.slice(i + 1)}
-	}
-	if (text[i] === '"') {
-		while (text[++i] !== '"') {
-			if (text[i] === '\\') i++ // skip escaped character
-		}
+		else if (!WHITESPACE.test(text[i])) break
 		i++
 	}
-	else {
-		while (!(text[++i] === ')' || WHITESPACE.test(text[i])));
+	return text.slice(i)
+}
+function parseAtom(text: string): ParseResult<SExpression> {
+	let i = 1
+	if (text[0] === '"') {
+		while (text[i++] !== '"') {
+			if (text[i] === '\\') i++ // skip escaped character
+		}
 	}
-	return {result: {op: text.slice(0, i), args: []}, rest: text.slice(i)}
+	else {
+		while (!(text[i] === ')' || text[i] === ';' || WHITESPACE.test(text[i]))) i++
+	}
+	return {result: {type: 'atom', atom: text.slice(0, i)},rest: text.slice(i)}
+}
+function parseList(text: string): ParseResult<SExpression> {
+	const items: SExpression[] = []
+	while (true) {
+		text = parseSpace(text)
+		if (text[0] === ')') break
+
+		const {result, rest} = parse(text)
+		items.push(result)
+		text = rest
+	}
+	return {result: {type: 'list', items}, rest: text.slice(1)}
+}
+export function parse(text: string): ParseResult<SExpression> {
+	text = parseSpace(text)
+	return text[0] === '(' ? parseList(text.slice(1)) : parseAtom(text)
 }
