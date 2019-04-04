@@ -22,10 +22,13 @@ const TESTS = [
 	'forward',
 	'i32',
 	'i64',
-	'int_exprs'
+	'int_exprs',
+	'memory',
+	'memory_redundancy',
+	'stack'
 ]
 const FUNC_NAME = /^"(.+)"$/
-const TESTS_START = /\((?:assert|invoke)/
+const TESTS_START = /\n\((?:assert_return|invoke)/
 
 const exec = promisify(childProcess.exec),
       execFile = promisify(childProcess.execFile),
@@ -112,8 +115,13 @@ function getValue(expression: SExpression) {
 		let assertStartMatch: RegExpMatchArray | null
 		let testCount = 0
 		while (assertStartMatch = TESTS_START.exec(testFile)) {
-			const assertsStart = assertStartMatch.index
+			const assertsStart = assertStartMatch.index!
 			const modulePath = wastPath.replace('.wast', '-module.wast')
+			const nextModule = testFile.indexOf('\n(module', testFile.indexOf('(module'))
+			if (nextModule >= 0 && nextModule < assertsStart) { // no asserts to test
+				testFile = testFile.slice(nextModule)
+				continue
+			}
 			await writeFile(modulePath, testFile.slice(0, assertsStart))
 			const wasmPath = wastPath.replace('.wast', '.wasm')
 			try {
@@ -138,11 +146,10 @@ function getValue(expression: SExpression) {
 			const initFunction = `wasm_${test}_init_module`
 			const hasInit = headerFile.includes(`void ${initFunction}(void);`)
 			if (hasInit) cFile += initFunction + '();\n'
-			const nextModule = testFile.indexOf('\n(module', assertsStart)
 			let asserts = nextModule < 0
 				? testFile.slice(assertsStart)
 				: testFile.slice(assertsStart, nextModule)
-			makeTests: while (assertStartMatch = TESTS_START.exec(asserts)) {
+			makeTests: while (TESTS_START.test(asserts)) {
 				const {result, rest} = parse(asserts)
 				if (result.type === 'atom') throw new Error('Not a test: ' + JSON.stringify(result))
 				const [op, ...args] = result.items
