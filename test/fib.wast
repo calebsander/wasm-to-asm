@@ -3,7 +3,6 @@
 		(local $prevPrev i64)
 		(local $prev i64)
 		(set_local $prevPrev (i64.const 1))
-		(set_local $prev (i64.const 0))
 		(loop $computeNext
 			(if (get_local $n) (then
 				(i64.add (get_local $prevPrev) (get_local $prev))

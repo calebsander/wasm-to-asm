@@ -26,6 +26,7 @@ export type JumpCond
 	| 'a' | 'b'
 	| 'ae' | 'be'
 	| 'p' | 'np'
+	| 's' | 'ns'
 
 export type GASDirective
 	= {type: 'text' | 'data', args?: void}
@@ -156,6 +157,24 @@ export class CmpInstruction extends SrcDestInstruction {
 		return FLOAT_WIDTHS.has(this.width) ? 'ucomi' : 'cmp'
 	}
 }
+export class CvtFloatInstruction extends SrcDestInstruction {
+	constructor(
+		src: Datum,
+		dest: Datum,
+		readonly srcWidth: Width,
+		destWidth: Width
+	) { super(src, dest, destWidth) }
+	get op() { return `cvts${this.srcWidth}2` }
+}
+export class CvtToFloatInstruction extends SrcDestInstruction {
+	get op() { return 'cvtsi2' }
+}
+export class CvtToIntInstruction extends SrcDestInstruction {
+	constructor(src: Datum, dest: Datum, readonly srcWidth: Width) {
+		super(src, dest)
+	}
+	get op() { return `cvtts${this.srcWidth}2si` }
+}
 export class DivInstruction {
 	constructor(
 		readonly src: Datum,
@@ -213,6 +232,10 @@ export class MoveExtendInstruction extends SrcDestInstruction {
 }
 export class MulInstruction extends SrcDestInstruction {
 	get op() { return 'mul' }
+}
+export class NotInstruction {
+	constructor(readonly datum: Datum) {}
+	get str() { return 'not ' + datumToString(this.datum) }
 }
 export class OrInstruction extends SrcDestInstruction {
 	get op() { return 'or' }

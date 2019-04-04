@@ -744,36 +744,48 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			break
 		}
 		case 'select': {
-			const float = context.peek()
-			const intermediateRegisters =
-				float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
 			let cond = context.resolvePop()
 			if (!cond) {
-				cond = intermediateRegisters[0]
+				cond = INT_INTERMEDIATE_REGISTERS[0]
 				output.push(new asm.PopInstruction(cond))
 			}
-			let ifFalse = context.resolvePop()
-			if (!ifFalse) {
-				ifFalse = intermediateRegisters[1]
-				output.push(new asm.PopInstruction(ifFalse))
-			}
-			const ifFalseDatum: asm.Datum = {type: 'register', register: ifFalse}
-			let ifTrue = context.resolvePop() // also where the result will go
-			const onStack = !ifTrue
-			if (onStack) {
-				ifTrue = INT_INTERMEDIATE_REGISTERS[2]
-				output.push(new asm.PopInstruction(ifTrue))
-			}
 			const condDatum: asm.Datum = {type: 'register', register: cond, width: 'l'}
+			const float = context.peek()
+			const ifFalse = context.resolvePop()
+			let ifFalseDatum: asm.Datum | undefined
+			if (ifFalse) ifFalseDatum = {type: 'register', register: ifFalse}
+			if (!ifFalse || float) {
+				const newIfFalse = INT_INTERMEDIATE_REGISTERS[1]
+				const newDatum: asm.Datum = {type: 'register', register: newIfFalse}
+				output.push(ifFalse
+					? new asm.MoveInstruction(ifFalseDatum!, newDatum, 'q')
+					: new asm.PopInstruction(newIfFalse)
+				)
+				ifFalseDatum = newDatum
+			}
+			const ifTrue = context.resolvePop() // also where the result will go
+			const ifTrueDatum: asm.Datum | undefined =
+				ifTrue ? {type: 'register', register: ifTrue} : undefined
+			const onStack = !ifTrue
+			let ifTrueNewDatum: asm.Datum
+			if (onStack || float) {
+				const newIfTrue = INT_INTERMEDIATE_REGISTERS[2]
+				const newDatum: asm.Datum = {type: 'register', register: newIfTrue}
+				output.push(onStack
+					? new asm.PopInstruction(newIfTrue)
+					: new asm.MoveInstruction(ifTrueDatum!, newDatum, 'q')
+				)
+				ifTrueNewDatum = newDatum
+			}
+			else ifTrueNewDatum = ifTrueDatum!
 			output.push(
 				new asm.TestInstruction(condDatum, condDatum),
-				new asm.CMoveInstruction(
-					ifFalseDatum,
-					{type: 'register', register: ifTrue!},
-					'e'
-				)
+				new asm.CMoveInstruction(ifFalseDatum!, ifTrueNewDatum, 'e')
 			)
 			if (onStack) output.push(new asm.PushInstruction(ifTrue!))
+			else if (float) {
+				output.push(new asm.MoveInstruction(ifTrueNewDatum, ifTrueDatum!, 'q'))
+			}
 			context.push(float)
 			break
 		}
@@ -1445,6 +1457,89 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			if (onStack) output.push(new asm.PushInstruction(value!))
 			break
 		}
+		case 'i32.trunc_s/f32':
+		case 'i32.trunc_u/f32':
+		case 'i32.trunc_s/f64':
+		case 'i32.trunc_u/f64':
+		case 'i64.trunc_s/f32':
+		case 'i64.trunc_u/f32':
+		case 'i64.trunc_s/f64':
+		case 'i64.trunc_u/f64': {
+			let [resultType, fullOperation] = instruction.type.split('.') as [ValueType, string]
+			const [operation, sourceType] = fullOperation.split('/') as [string, ValueType]
+			const sourceWidth = typeWidth(sourceType)
+			const signed = operation.endsWith('_s')
+			let operand = context.resolvePop()
+			const onStack = !operand
+			let datum: asm.Datum =
+				operand ? {type: 'register', register: operand} : STACK_TOP
+			let wrapTo32 = false
+			let highBitDatum: asm.Datum | undefined
+			if (!signed) {
+				if (resultType === 'i32') {
+					resultType = 'i64'
+					wrapTo32 = true
+				}
+				else { // i64
+					if (onStack) {
+						operand = FLOAT_INTERMEDIATE_REGISTERS[0]
+						datum = {type: 'register', register: operand}
+						output.push(new asm.MoveInstruction(STACK_TOP, datum, 'q'))
+					}
+					const highBitThreshold = 2 ** 63
+					const wideSource = sourceWidth === 'd'
+					const dataView = new DataView(new ArrayBuffer(wideSource ? 8 : 4))
+					if (wideSource) dataView.setFloat64(0, highBitThreshold, true)
+					else dataView.setFloat32(0, highBitThreshold, true)
+					const thresholdInt =
+						wideSource ? dataView.getBigUint64(0, true) : dataView.getUint32(0, true)
+					const thresholdIntDatum: asm.Datum =
+						{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+					const thresholdDatum: asm.Datum =
+						{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[0]}
+					const label = context.makeLabel('CONVERT_U64_END')
+					highBitDatum = {type: 'register', register: INT_INTERMEDIATE_REGISTERS[1]}
+					output.push(
+						new asm.XorInstruction(highBitDatum, highBitDatum),
+						new asm.MoveInstruction(
+							{type: 'immediate', value: thresholdInt},
+							{...thresholdIntDatum, width: wideSource ? 'q' : 'l'}
+						),
+						new asm.MoveInstruction(thresholdIntDatum, thresholdDatum, 'q'),
+						new asm.CmpInstruction(thresholdDatum, datum, sourceWidth),
+						new asm.JumpInstruction(label, 'b'),
+						new asm.MoveInstruction(
+							{type: 'immediate', value: BigInt(highBitThreshold)}, highBitDatum
+						),
+						new asm.SubInstruction(thresholdDatum, datum, sourceWidth),
+						new asm.Label(label)
+					)
+				}
+			}
+			let resultRegister = context.resolvePush(false)
+			const toPush = !resultRegister
+			if (toPush) [resultRegister] = INT_INTERMEDIATE_REGISTERS
+			const resultDatum: asm.Datum =
+				{type: 'register', register: resultRegister!, width: typeWidth(resultType)}
+			output.push(new asm.CvtToIntInstruction(datum, resultDatum, sourceWidth))
+			if (wrapTo32) {
+				// i32 needs to be stored with upper 32 bits zeroed
+				const lowDatum: asm.Datum = {...resultDatum, width: 'l'}
+				output.push(new asm.MoveInstruction(lowDatum, lowDatum))
+			}
+			if (highBitDatum) {
+				output.push(new asm.XorInstruction(highBitDatum, resultDatum))
+			}
+			const stackHeightChange = Number(toPush) - Number(onStack)
+			if (stackHeightChange) {
+				output.push(new asm.SubInstruction(
+					{type: 'immediate', value: stackHeightChange << 3},
+					{type: 'register', register: 'rsp'}
+				))
+			}
+			if (toPush) output.push(new asm.MoveInstruction(resultDatum, STACK_TOP))
+			break
+		}
 		case 'i64.extend_s': {
 			let value = context.resolvePop()
 			const onStack = !value
@@ -1463,6 +1558,98 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 		}
 		case 'i64.extend_u':
 			break // 32-bit values are already stored with upper bits zeroed
+		case 'f32.convert_s/i32':
+		case 'f32.convert_u/i32':
+		case 'f32.convert_s/i64':
+		case 'f32.convert_u/i64':
+		case 'f64.convert_s/i32':
+		case 'f64.convert_u/i32':
+		case 'f64.convert_s/i64':
+		case 'f64.convert_u/i64': {
+			const [resultType, fullOperation] = instruction.type.split('.') as [ValueType, string]
+			let [operation, sourceType] = fullOperation.split('/') as [string, ValueType]
+			const signed = operation.endsWith('_s')
+			let operand = context.resolvePop()
+			const onStack = !operand
+			let datum: asm.Datum =
+				operand ? {type: 'register', register: operand} : STACK_TOP
+			let doubleNeededDatum: asm.Datum | undefined
+			if (!signed) {
+				if (sourceType === 'i32') sourceType = 'i64'
+				else { // i64
+					if (onStack) {
+						operand = INT_INTERMEDIATE_REGISTERS[0]
+						datum = {type: 'register', register: operand}
+						output.push(new asm.MoveInstruction(STACK_TOP, datum))
+					}
+					const lowBitDatum: asm.Datum =
+						{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1]}
+					doubleNeededDatum =
+						{type: 'register', register: INT_INTERMEDIATE_REGISTERS[2]}
+					const label = context.makeLabel('CONVERT_U64_END')
+					output.push(
+						// Modified from https://stackoverflow.com/a/11725575
+						new asm.XorInstruction(doubleNeededDatum, doubleNeededDatum),
+						new asm.TestInstruction(datum, datum),
+						new asm.JumpInstruction(label, 'ns'),
+						new asm.NotInstruction(doubleNeededDatum),
+						new asm.MoveInstruction(datum, lowBitDatum),
+						new asm.AndInstruction({type: 'immediate', value: 1}, lowBitDatum),
+						new asm.ShrInstruction({type: 'immediate', value: 1}, datum),
+						new asm.OrInstruction(lowBitDatum, datum),
+						new asm.Label(label)
+					)
+				}
+			}
+			if (datum.type === 'register') datum.width = typeWidth(sourceType)
+			const resultWidth = typeWidth(resultType)
+			let resultRegister = context.resolvePush(true)
+			const toPush = !resultRegister
+			if (toPush) resultRegister = FLOAT_INTERMEDIATE_REGISTERS[0]
+			const resultDatum: asm.Datum = {type: 'register', register: resultRegister!}
+			output.push(new asm.CvtToFloatInstruction(datum, resultDatum, resultWidth))
+			if (doubleNeededDatum) {
+				const addDatum: asm.Datum =
+					{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[1]}
+				const maskDatum: asm.Datum =
+					{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[2]}
+				output.push(
+					new asm.MoveInstruction(resultDatum, addDatum, resultWidth),
+					new asm.MoveInstruction(doubleNeededDatum, maskDatum, 'q'),
+					new asm.AndPackedInstruction(maskDatum, addDatum, resultWidth),
+					new asm.AddInstruction(addDatum, resultDatum, resultWidth)
+				)
+			}
+			const stackHeightChange = Number(toPush) - Number(onStack)
+			if (stackHeightChange) {
+				output.push(new asm.SubInstruction(
+					{type: 'immediate', value: stackHeightChange << 3},
+					{type: 'register', register: 'rsp'}
+				))
+			}
+			if (toPush) output.push(new asm.MoveInstruction(resultDatum, STACK_TOP))
+			break
+		}
+		case 'f32.demote':
+		case 'f64.promote': {
+			const operand = context.resolvePop()
+			let source: asm.Datum, target: asm.Datum
+			if (operand) source = target = {type: 'register', register: operand}
+			else {
+				source = STACK_TOP
+				target = {type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[0]}
+			}
+			const [type] = instruction.type.split('.') as [ValueType]
+			const targetWidth = typeWidth(type)
+			output.push(new asm.CvtFloatInstruction(
+				source, target, targetWidth === 's' ? 'd' : 's', targetWidth
+			))
+			if (!operand) {
+				output.push(new asm.MoveInstruction(target, STACK_TOP, targetWidth))
+			}
+			context.push(true)
+			break
+		}
 		case 'i32.reinterpret':
 		case 'i64.reinterpret':
 		case 'f32.reinterpret':
@@ -1661,7 +1848,7 @@ export function compileModule(
 		const newInitInstructions: asm.AssemblyInstruction[] = []
 		declarations.push(new FunctionDeclaration(
 			'void',
-			addSysvLabel(moduleName, 'init', newInitInstructions),
+			addSysvLabel(moduleName, 'init_module', newInitInstructions),
 			['void']
 		))
 		for (const register of SYSV_CALLEE_SAVE_REGISTERS) {
@@ -1684,7 +1871,7 @@ export function compileModule(
 		functionsStats.set(i, {
 			params,
 			locals: functionsLocals[i],
-			result: (results as [] | [ValueType])[0]
+			result: (results as [ValueType?])[0]
 		})
 	}
 	const assemblySections = [
@@ -1698,15 +1885,29 @@ export function compileModule(
 		const bodyAssembly: asm.AssemblyInstruction[] = []
 		compileInstructions(segments[i].instructions, context, bodyAssembly)
 		const registersUsed = context.registersUsed(true)
-		const saveInstructions: asm.AssemblyInstruction[] = []
+		const setupInstructions: asm.AssemblyInstruction[] = []
 		for (const register of registersUsed) {
-			saveInstructions.push(new asm.PushInstruction(register))
+			setupInstructions.push(new asm.PushInstruction(register))
 		}
 		const {result, usesBP} = context
 		if (usesBP) {
-			const {stackLocals} = context
-			saveInstructions.push(new asm.EnterInstruction(stackLocals << 3))
+			setupInstructions.push(new asm.EnterInstruction(context.stackLocals << 3))
 		}
+		context.locals.forEach(({float}, i) => {
+			const location = context.resolveLocal(i)
+			const datum: asm.Datum = location instanceof BPRelative
+				? location.datum
+				: {type: 'register', register: location}
+			const zeroDatum: asm.Datum = float
+				? {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+				: datum
+			setupInstructions.push(new asm.MoveInstruction(
+				{type: 'immediate', value: 0}, zeroDatum, 'q'
+			))
+			if (float) {
+				setupInstructions.push(new asm.MoveInstruction(zeroDatum, datum, 'q'))
+			}
+		})
 		const returnInstructions: asm.AssemblyInstruction[] =
 			[new asm.Label(context.moduleContext.returnLabel(i))]
 		if (result) {
@@ -1777,7 +1978,7 @@ export function compileModule(
 		}
 		assemblySections.push(
 			labels,
-			saveInstructions,
+			setupInstructions,
 			bodyAssembly,
 			returnInstructions,
 			sysvInstructions

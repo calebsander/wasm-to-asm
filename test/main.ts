@@ -18,12 +18,14 @@ const TESTS = [
 	'f64_bitwise',
 	'f64_cmp',
 	'fac',
+	'float_exprs',
 	'forward',
 	'i32',
 	'i64',
 	'int_exprs'
 ]
 const FUNC_NAME = /^"(.+)"$/
+const TESTS_START = /\((?:assert|invoke)/
 
 const exec = promisify(childProcess.exec),
       execFile = promisify(childProcess.execFile),
@@ -102,9 +104,10 @@ function getValue({op, args}: SExpression) {
 	const results = await Promise.all(TESTS.map(async test => {
 		const wastPath = `${__dirname}/spec/test/core/${test}.wast`
 		let testFile = await readFile(wastPath, 'utf8')
-		let assertsStart: number
+		let assertStartMatch: RegExpMatchArray | null
 		let testCount = 0
-		while ((assertsStart = testFile.indexOf('(assert')) >= 0) {
+		while (assertStartMatch = TESTS_START.exec(testFile)) {
+			const assertsStart = assertStartMatch.index
 			const modulePath = wastPath.replace('.wast', '-module.wast')
 			await writeFile(modulePath, testFile.slice(0, assertsStart))
 			const wasmPath = wastPath.replace('.wast', '.wasm')
@@ -127,19 +130,22 @@ function getValue({op, args}: SExpression) {
 			`
 			const hFilePath = wasmPath.replace('.wasm', '.h')
 			const headerFile = await readFile(hFilePath, 'utf8')
-			const initFunction = `wasm_${test}_init`
+			const initFunction = `wasm_${test}_init_module`
 			const hasInit = headerFile.includes(`void ${initFunction}(void);`)
 			if (hasInit) cFile += initFunction + '();\n'
 			const nextModule = testFile.indexOf('\n(module', assertsStart)
 			let asserts = nextModule < 0
 				? testFile.slice(assertsStart)
 				: testFile.slice(assertsStart, nextModule)
-			while (asserts.startsWith('(assert')) {
+			while ((assertStartMatch = TESTS_START.exec(asserts)) && !assertStartMatch.index) {
 				const {result, rest} = parse(asserts)
 				let processed = true
 				switch (result.op) {
 					case 'assert_return':
-						const [invoke, expected] = result.args
+					case 'invoke':
+						let invoke: SExpression, expected: SExpression | undefined
+						if (result.op === 'invoke') invoke = result
+						else [invoke, expected] = result.args as [SExpression, SExpression?]
 						assert.equal(invoke.op, 'invoke')
 						const [func, ...args] = invoke.args
 						assert.equal(func.args.length, 0)
@@ -148,10 +154,13 @@ function getValue({op, args}: SExpression) {
 						const funcName =
 							`wasm_${test}_${funcNameMatch[1].replace(INVALID_EXPORT_CHAR, '_')}`
 						const functionCall = `${funcName}(${args.map(getValue).join(', ')})`
-						const value = getValue(expected)
-						cFile += value.includes(C_NAN)
-							? `assert(isnan(${functionCall}));\n`
-							: `assert(${functionCall} == ${value});\n`
+						if (expected) {
+							const value = getValue(expected)
+							cFile += value.includes(C_NAN)
+								? `assert(isnan(${functionCall}));\n`
+								: `assert(${functionCall} == ${value});\n`
+						}
+						else cFile += functionCall + ';\n'
 						break
 					case 'assert_exhaustion':
 					case 'assert_invalid':

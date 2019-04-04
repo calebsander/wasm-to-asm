@@ -12,7 +12,6 @@ Condier the following WebAssembly module to compute Fibonacci numbers:
     (local $prevPrev i64)
     (local $prev i64)
     (set_local $prevPrev (i64.const 1))
-    (set_local $prev (i64.const 0))
     (loop $computeNext
       (if (get_local $n) (then
         (i64.add (get_local $prevPrev) (get_local $prev))
@@ -41,14 +40,12 @@ MODULE0_FUNC0:
   push %r8
   push %r9
   push %r10
+  mov $0, %rsi
+  mov $0, %r8
   # {"type":"i64.const","value":"1"}
   mov $1, %r9
   # {"type":"set_local","local":1}
   mov %r9, %rsi
-  # {"type":"i64.const","value":"0"}
-  mov $0, %r9
-  # {"type":"set_local","local":2}
-  mov %r9, %r8
   # {"type":"loop","returns":"empty","instructions":[...]}
   MODULE0_FUNC0_LOOP1:
   # {"type":"get_local","local":0}
@@ -61,7 +58,7 @@ MODULE0_FUNC0:
   # {"type":"get_local","local":2}
   mov %r8, %r10
   # {"type":"i64.add"}
-  addq %r10, %r9
+  add %r10, %r9
   # {"type":"get_local","local":2}
   mov %r8, %r10
   # {"type":"set_local","local":1}
@@ -73,7 +70,7 @@ MODULE0_FUNC0:
   # {"type":"i32.const","value":1}
   mov $1, %r10d
   # {"type":"i32.sub"}
-  subl %r10d, %r9d
+  sub %r10d, %r9d
   # {"type":"set_local","local":0}
   mov %r9, %rdi
   # {"type":"br","label":1}
