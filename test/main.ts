@@ -44,6 +44,9 @@ async function compileTest(test: string, ...ccArgs: string[]) {
 	await execFile(CC, [C_STD, baseFile + '.s', runPath + '.c', '-o', runPath, ...ccArgs])
 	return {baseFile, runPath}
 }
+function checkSuccessOutput({stdout}: {stdout: string}) {
+	if (stdout !== SUCCESS) throw new Error('Unexpected output:\n' + stdout)
+}
 async function fibTest() {
 	const test = 'fib'
 	try {
@@ -61,7 +64,7 @@ async function sha256Test() {
 	const test = 'sha256'
 	try {
 		const {runPath} = await compileTest(test, '-lcrypto')
-		await execFile(runPath)
+		checkSuccessOutput(await execFile(runPath))
 	}
 	catch (e) {
 		console.error(e)
@@ -69,6 +72,19 @@ async function sha256Test() {
 	}
 
 	return {test, testCount: 1}
+}
+async function trigTest() {
+	const test = 'trig'
+	try {
+		const {runPath} = await compileTest(test, '-lm')
+		checkSuccessOutput(await execFile(runPath))
+	}
+	catch (e) {
+		console.error(e)
+		return {test}
+	}
+
+	return {test, testCount: 2}
 }
 
 function getValue(expression: SExpression) {
@@ -206,8 +222,7 @@ function getValue(expression: SExpression) {
 			await writeFile(cFilePath, cFile)
 			try {
 				await execFile(CC, [C_STD, sFilePath, cFilePath, '-o', runPath])
-				const {stdout} = await execFile(runPath)
-				if (stdout !== SUCCESS) throw new Error('Unexpected output:\n' + stdout)
+				checkSuccessOutput(await execFile(runPath))
 			}
 			catch (e) {
 				console.error(e)
@@ -217,7 +232,8 @@ function getValue(expression: SExpression) {
 		return {test, testCount}
 	}).concat([
 		fibTest(),
-		sha256Test()
+		sha256Test(),
+		trigTest()
 	]))
 
 	let passes = 0

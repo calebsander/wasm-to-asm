@@ -534,6 +534,8 @@ const WASM_TYPE_DIRECTIVES = new Map<ValueType, GlobalDirective>([
 		data: new asm.Directive({type: 'quad', args: [0]})
 	}]
 ])
+WASM_TYPE_DIRECTIVES.set('f32', WASM_TYPE_DIRECTIVES.get('i32')!)
+WASM_TYPE_DIRECTIVES.set('f64', WASM_TYPE_DIRECTIVES.get('i64')!)
 function compileInstruction(instruction: Instruction, context: CompilationContext, output: asm.AssemblyInstruction[]) {
 	// output.push(new asm.Comment(
 	// 	JSON.stringify(instruction, (_, v) => typeof v === 'bigint' ? String(v) : v)
@@ -723,13 +725,14 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 				const float = isFloat(result)
 				const resultRegister = float ? FLOAT_RESULT_REGISTER : INT_RESULT_REGISTER
 				const pushTo = context.resolvePush(float)
-				if (pushTo) {
-					output.push(new asm.MoveInstruction(
-						{type: 'register', register: resultRegister},
-						{type: 'register', register: pushTo}
-					))
-				}
-				else output.push(new asm.PushInstruction(resultRegister))
+				output.push(pushTo
+					? new asm.MoveInstruction(
+							{type: 'register', register: resultRegister},
+							{type: 'register', register: pushTo},
+							'q'
+						)
+					: new asm.PushInstruction(resultRegister)
+				)
 			}
 			break
 		}
