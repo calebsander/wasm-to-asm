@@ -39,22 +39,16 @@
 	(func (export "fitInput") (param $byteLength i32)
 		(local $needed i32)
 		(set_local $needed ;; needed = INPUT_START + byteLength + 63
-			(i32.add
-				(get_global $INPUT_START)
-				(i32.add (get_local $byteLength) (i32.const 63)) ;; could use up to 63 extra bytes
-			)
+			;; Could use up to 63 extra bytes
+			(i32.add (get_local $byteLength) (i32.const 575)) ;; INPUT_START + 63 == 575
 		)
 		(if ;; if (needed > 0) memory.grow(needed)
 			(i32.gt_s
-				(tee_local $needed ;; needed = (needed >> 16) + (needed % (1 << 16) ? 1 : 0) - memory.size
+				(tee_local $needed ;; needed = (needed >> 16) + !!(needed % (1 << 16)) - memory.size
 					(i32.sub
 						(i32.add
 							(i32.shr_u (get_local $needed) (i32.const 16))
-							(select
-								(i32.const 1)
-								(i32.const 0)
-								(i32.and (get_local $needed) (i32.const 0xffff))
-							)
+							(i32.ne (i32.and (get_local $needed) (i32.const 0xffff)) (i32.const 0))
 						)
 						(current_memory)
 					)
@@ -66,15 +60,13 @@
 	)
 	(func (export "sha256") (param $byteLength i32)
 		(local $messageLength i32)
-		(local $lengthIndex i32)
-		(local $h0 i32) (local $h1 i32) (local $h2 i32) (local $h3 i32)
-			(local $h4 i32) (local $h5 i32) (local $h6 i32) (local $h7 i32)
+		(local $i i32) (local $i4 i32)
+		(local $temp1 i32) (local $temp2 i32)
 		(local $a i32) (local $b i32) (local $c i32) (local $d i32)
 			(local $e i32) (local $f i32) (local $g i32) (local $h i32)
-		(local $chunkStart i32)
-		(local $i i32) (local $i4 i32)
-		(local $wMinus15 i32) (local $wMinus2 i32)
-		(local $temp1 i32) (local $temp2 i32)
+		(local $chunkOrLengthStart i32) ;; used for both chunkStart and lengthStart
+		(local $h0 i32) (local $h1 i32) (local $h2 i32) (local $h3 i32)
+			(local $h4 i32) (local $h5 i32) (local $h6 i32) (local $h7 i32)
 		(set_local $messageLength ;; messageLength = byteLength + extraBytes
 			(i32.add
 				;; byteLength
@@ -89,26 +81,25 @@
 				)
 			)
 		)
-		(set_local $i ;; i = byteLength
-			(i32.add (get_global $INPUT_START) (get_local $byteLength))
+		(set_local $i (get_local $byteLength))
+		(i32.store8 offset=512 (get_local $i) (i32.const 128)) ;; buf[byteLength] = (i8)128
+		(set_local $chunkOrLengthStart ;; lengthStart = messageLength - 8
+			(i32.sub (get_local $messageLength) (i32.const 8))
 		)
-		(i32.store8 (get_local $i) (i32.const 128)) ;; buf[byteLength] = (i8)128
-		(set_local $lengthIndex ;; lengthIndex = messageLength - 8
-			(i32.sub
-				(i32.add (get_global $INPUT_START) (get_local $messageLength))
-				(i32.const 8)
-			)
-		)
-		;; for (i = byteLength + 1; i < lengthIndex; i++)
+		;; for (i = byteLength + 1; i < lengthStart; i++)
 		(loop $zeroBytes
-			;; if (++i < lengthIndex)
-			(if (i32.lt_u (tee_local $i (i32.add (get_local $i) (i32.const 1))) (get_local $lengthIndex)) (then
-				(i32.store8 (get_local $i) (i32.const 0)) ;; buf[i] = 0
+			;; if (++i < lengthStart)
+			(i32.lt_u
+				(tee_local $i (i32.add (get_local $i) (i32.const 1)))
+				(get_local $chunkOrLengthStart)
+			)
+			(if (then
+				(i32.store8 offset=512 (get_local $i) (i32.const 0)) ;; buf[i] = 0
 				(br $zeroBytes) ;; continue
 			))
 		)
-		(call $store64BE ;; buf[lengthIndex] = (i64)byteLength << 3
-			(get_local $lengthIndex)
+		(call $store64BE ;; buf[lengthStart] = (i64)byteLength << 3
+			(i32.add (get_global $INPUT_START) (get_local $chunkOrLengthStart))
 			(i64.shl (i64.extend_u/i32 (get_local $byteLength)) (i64.const 3))
 		)
 		(set_local $h0 (i32.const 0x6a09e667))
@@ -120,7 +111,7 @@
 		(set_local $h6 (i32.const 0x1f83d9ab))
 		(set_local $h7 (i32.const 0x5be0cd19))
 		;; for (chunkStart = 0; chunkStart < messageLength; chunkStart += 64)
-		(set_local $chunkStart (i32.const 0))
+		(set_local $chunkOrLengthStart (i32.const 0))
 		(loop $chunkLoop
 			;; for (i = 0; i < 16; i++)
 			(set_local $i (i32.const 0))
@@ -131,7 +122,7 @@
 					(call $load32BE
 						(i32.add
 							(get_global $INPUT_START)
-							(i32.add (get_local $chunkStart) (get_local $i4))
+							(i32.add (get_local $chunkOrLengthStart) (get_local $i4))
 						)
 					)
 				)
@@ -144,36 +135,37 @@
 			)
 			;; for (i = 16; i < 64; i++)
 			(loop $extendW
-				(set_local $wMinus15 ;; wMinus15 = w[i - 15]
-					(i32.load align=2 (i32.shl (i32.sub (get_local $i) (i32.const 15)) (i32.const 2)))
+				(set_local $i4 (i32.shl (get_local $i) (i32.const 2))) ;; i4 = i << 2
+				(set_local $temp1 ;; temp1 = w[i - 15]
+					(i32.load align=2 (i32.sub (get_local $i4) (i32.const 60)))
 				)
-				(set_local $wMinus2 ;; wMinus2 = w[i = 2]
-					(i32.load align=2 (i32.shl (i32.sub (get_local $i) (i32.const  2)) (i32.const 2)))
+				(set_local $temp2 ;; temp2 = w[i - 2]
+					(i32.load align=2 (i32.sub (get_local $i4) (i32.const 8)))
 				)
 				(i32.store align=2 ;; w[i] = w[i - 16] + s0 + w[i - 7] + s1
-					(i32.shl (get_local $i) (i32.const 2))
+					(get_local $i4)
 					(i32.add
 						(i32.add
 							;; w[i - 16]
-							(i32.load align=2 (i32.shl (i32.sub (get_local $i) (i32.const 16)) (i32.const 2)))
-							;; s0 (== rotr(wMinus15, 7) ^ rotr(wMinus15, 18) ^ (wMinus15 >>> 3))
+							(i32.load align=2 (i32.sub (get_local $i4) (i32.const 64)))
+							;; s0 (== rotr(temp1, 7) ^ rotr(temp1, 18) ^ (temp1 >>> 3))
 							(i32.xor
-								(i32.rotr (get_local $wMinus15) (i32.const 7))
+								(i32.rotr (get_local $temp1) (i32.const 7))
 								(i32.xor
-									(i32.rotr (get_local $wMinus15) (i32.const 18))
-									(i32.shr_u (get_local $wMinus15) (i32.const 3))
+									(i32.rotr (get_local $temp1) (i32.const 18))
+									(i32.shr_u (get_local $temp1) (i32.const 3))
 								)
 							)
 						)
 						(i32.add
 							;; w[i - 7]
-							(i32.load align=2 (i32.shl (i32.sub (get_local $i) (i32.const 7)) (i32.const 2)))
-							;; s1 (== rotr(wMinus2, 17) ^ rotr(wMinus2, 19) ^ (wMinus2 >>> 10))
+							(i32.load align=2 (i32.sub (get_local $i4) (i32.const 28)))
+							;; s1 (== rotr(temp2, 17) ^ rotr(temp2, 19) ^ (temp2 >>> 10))
 							(i32.xor
-								(i32.rotr (get_local $wMinus2) (i32.const 17))
+								(i32.rotr (get_local $temp2) (i32.const 17))
 								(i32.xor
-									(i32.rotr (get_local $wMinus2) (i32.const 19))
-									(i32.shr_u (get_local $wMinus2) (i32.const 10))
+									(i32.rotr (get_local $temp2) (i32.const 19))
+									(i32.shr_u (get_local $temp2) (i32.const 10))
 								)
 							)
 						)
@@ -200,11 +192,10 @@
 				(set_local $i4 (i32.shl (get_local $i) (i32.const 2))) ;; i4 = i << 2
 				(set_local $temp1 ;; temp1 = h + S1 + ch + K[i] + w[i]
 					(i32.add
-						;; h
 						(get_local $h)
 						(i32.add
 							(i32.add
-								;; S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+								;; S1 (== rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25))
 								(i32.xor
 									(i32.rotr (get_local $e) (i32.const 6))
 									(i32.xor
@@ -230,34 +221,38 @@
 						)
 					)
 				)
-				(set_local $temp2 ;; temp2 = S0 + maj
-					(i32.add
-						;; S0 (== rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22))
-						(i32.xor
-							(i32.rotr (get_local $a) (i32.const 2))
-							(i32.xor
-								(i32.rotr (get_local $a) (i32.const 13))
-								(i32.rotr (get_local $a) (i32.const 22))
-							)
-						)
-						;; maj = (a & b) ^ (a & c) ^ (b & c)
-						(i32.xor
-							(i32.and (get_local $a) (get_local $b))
-							(i32.xor
-								(i32.and (get_local $a) (get_local $c))
-								(i32.and (get_local $b) (get_local $c))
-							)
-						)
-					)
-				)
 				(set_local $h (get_local $g)) ;; h = g
 				(set_local $g (get_local $f)) ;; g = f
 				(set_local $f (get_local $e)) ;; f = e
 				(set_local $e (i32.add (get_local $d) (get_local $temp1))) ;; e = d + temp1
 				(set_local $d (get_local $c)) ;; d = c
+				(get_local $a) ;; preserve value of a
+				(set_local $a ;; a = temp1 + temp2
+					(i32.add
+						(get_local $temp1)
+						;; temp2 (== S0 + maj)
+						(i32.add
+							;; S0 (== rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22))
+							(i32.xor
+								(i32.rotr (get_local $a) (i32.const 2))
+								(i32.xor
+									(i32.rotr (get_local $a) (i32.const 13))
+									(i32.rotr (get_local $a) (i32.const 22))
+								)
+							)
+							;; maj (== (a & b) ^ (a & c) ^ (b & c))
+							(i32.xor
+								(i32.and (get_local $a) (get_local $b))
+								(i32.xor
+									(i32.and (get_local $a) (get_local $c))
+									(i32.and (get_local $b) (get_local $c))
+								)
+							)
+						)
+					)
+				)
 				(set_local $c (get_local $b)) ;; c = b
-				(set_local $b (get_local $a)) ;; b = a
-				(set_local $a (i32.add (get_local $temp1) (get_local $temp2))) ;; a = temp1 + temp2
+				(set_local $b) ;; b = a
 				(br_if $updateHash ;; if (++i < 64) continue
 					(i32.lt_u
 						(tee_local $i (i32.add (get_local $i) (i32.const 1)))
@@ -275,7 +270,7 @@
 			(set_local $h7 (i32.add (get_local $h7) (get_local $h))) ;; h7 += h
 			(br_if $chunkLoop ;; if ((chunkStart += 64) < messageLength) continue
 				(i32.lt_u
-					(tee_local $chunkStart (i32.add (get_local $chunkStart) (i32.const 64)))
+					(tee_local $chunkOrLengthStart (i32.add (get_local $chunkOrLengthStart) (i32.const 64)))
 					(get_local $messageLength)
 				)
 			)
