@@ -131,7 +131,7 @@ There are several features that aren't supported yet:
 - `br_table` and `call_indirect` instructions
 - Linking multiple WebAssembly modules to each other
 - `start` functions in modules
-- Functions taking more than 13 int params or 14 float params
+- Functions taking more than 12 int params or 13 float params
 - Stopping compilation at `unreachable` and `br` instructions
 
 ## Calling convention
@@ -140,16 +140,36 @@ The calling convention is similar to SysV ABI but doesn't have any caller-save r
 
 ### Use of registers
 
-`rax`, `rcx`, and `rdx` are used to store intermediate values, e.g. when moving values between locations in memory and for the `select` instruction.
-(These registers were chosen because bitshift instructions (`shl`, `ror`, etc.) and division instructions (`div` and `idiv`) require an operand to be stored in them.)
-The rest of the general-purpose registers (`rdi`, `rsi`, `r8` to `r15`, `rbx`, and `rbp`) are used to store local variables and the bottom of the computation stack.
-If the local variables or computation stack overflow the registers, the rest are stored on the stack and `rbp` is used as a base pointer instead of a general-purpose register.
+#### `i32`/`i64` registers
+`%rax`, `%rcx`, and `%rdx` are used to store integer intermediates, e.g. when moving values between locations in memory.
+(These registers were chosen because bitshift instructions (`shl`, `ror`, etc.) and division instructions (`div` and `idiv`) require an operand to be stored in them. Also, `%rax` is needed to store integer return values.)
+The rest of the general-purpose registers (`%rdi`, `%rsi`, `%r8` to `%r15`, `%rbx`, and `%rbp`) are used to store local variables and the bottom of the integer computation stack.
+
+#### `f32`/`f64` registers
+Floats are stored individually in the lower 32 or 64 bits of the SIMD registers.
+`%xmm0`, `%xmm1`, and `%xmm15` are used to store intermediate values for float computations.
+(`%xmm0` was chosen because float return values are placed there. `%xmm15` was chosen because it is not used for function arguments in SysV, so params can be temporarily placed there while being moved between registers.)
+Registers `%xmm2` to `%xmm14` are used to store local variables and the bottom of the float computation stack.
+
+#### `%rbp`
+If the local variables or computation stack overflow the registers, the rest are stored on the stack and `%rbp` is used as a base pointer.
+Otherwise, `%rbp` is used as an integer register.
 This means that functions with few locals can have most of their computations performed on registers instead of the stack.
+
+#### Example
+Consider a function with the following local variables:
+- `(param $f f64) (param $i i32)`
+- `(local $i1 i64) ($local $i2 i32) (local $f1 f32)`
+
+The register usage will be:
+- Integer: `$i` in `%edi`, `$i1` in `%rsi`, and `$i2` in `%r8d`. The stack will be stored in `%r9` through `%r15`, `%rbx`, `%rbp`, and then `(%rsp)`.
+- Float: `$f` in `%xmm2` and `$f1` in `%xmm3`. The stack will be stored in `%xmm4` through `%xmm14`, and then `(%rsp)`.
 
 ### Caller-callee handoff
 
-The caller first sets up the param registers for the callee, saving any that it was using onto the stack.
-The caller then invokes the `call` instruction to push `rip` to the stack.
+The caller first sets up the param registers for the callee, saving any that were in use onto the stack.
+The caller then invokes the `call` instruction to push `%rip` to the stack.
 The callee pushes all registers it will modify, does its work, and then restores those registers.
-The callee places its return value in `rax` and invokes the `ret` instruction to return control to the caller.
+If the callee returns a value, it is placed in `%rax` if it is an integer and `%xmm0` if it is a float.
+The callee invokes the `ret` instruction to return control to the caller.
 Finally, the caller restores any registers it saved to the stack and moves the return value onto the computation stack.

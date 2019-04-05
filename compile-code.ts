@@ -32,10 +32,10 @@ const SYSV_CALLEE_SAVE_REGISTERS: asm.Register[] =
 	['rbx', 'rbp', 'r12', 'r13', 'r14', 'r15']
 const SYSV_CALLEE_SAVE_SET = new Set(SYSV_CALLEE_SAVE_REGISTERS)
 const FLOAT_INTERMEDIATE_COUNT = 3
-const FLOAT_INTERMEDIATE_REGISTERS: asm.Register[] = ['xmm0', 'xmm14', 'xmm15']
+const FLOAT_INTERMEDIATE_REGISTERS: asm.Register[] = ['xmm0', 'xmm1', 'xmm15']
 const [FLOAT_RESULT_REGISTER] = FLOAT_INTERMEDIATE_REGISTERS
 const FLOAT_GENERAL_REGISTERS = new Array(16 - FLOAT_INTERMEDIATE_COUNT)
-	.fill(0).map((_, i) => `xmm${i + 1}` as asm.Register)
+	.fill(0).map((_, i) => `xmm${i + 2}` as asm.Register)
 
 export const INVALID_EXPORT_CHAR = /[^A-Za-z0-9_]/g
 
@@ -417,9 +417,9 @@ function relocateArguments(
 		if (target.type === 'register') {
 			const {register} = target
 			if (moves.has(register)) {
-				// %rax and %xmm14 are not used for SysV params
+				// %rax and %xmm15 are not used for SysV params
 				let [evictTo] = INT_INTERMEDIATE_REGISTERS
-				if (evictTo === source) evictTo = FLOAT_INTERMEDIATE_REGISTERS[1]
+				if (evictTo === source) evictTo = FLOAT_INTERMEDIATE_REGISTERS[2]
 				evicted = {original: register, current: evictTo}
 				instructions.push(new asm.MoveInstruction(
 					target, {type: 'register', register: evictTo}, 'q'
@@ -755,6 +755,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			let ifFalseDatum: asm.Datum | undefined
 			if (ifFalse) ifFalseDatum = {type: 'register', register: ifFalse}
 			if (!ifFalse || float) {
+				// Put floats in an int register so we can use a cmov instruction
 				const newIfFalse = INT_INTERMEDIATE_REGISTERS[1]
 				const newDatum: asm.Datum = {type: 'register', register: newIfFalse}
 				output.push(ifFalse
