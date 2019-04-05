@@ -6,7 +6,7 @@
 	"scripts": {
 		"build": "tsc",
 		"wabt": "bash -c '[[ -d test/wabt ]]' || (git clone --depth 1 https://github.com/WebAssembly/wabt test/wabt && cd test/wabt && make gcc-release-no-tests)",
-		"clone-spec": "rm -rf test/spec && git clone --depth 1 https://github.com/WebAssembly/spec test/spec",
+		"clone-spec": "rm -rf test/spec && cd test && git clone --depth 1 https://github.com/WebAssembly/spec",
 		"test": "npm run build && npm run wabt && tsc -p test/tsconfig.json && npm run clone-spec && node test/main.js"
 	},
 	"author": "Caleb Sander",

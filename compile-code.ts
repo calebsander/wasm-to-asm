@@ -752,40 +752,40 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const condDatum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 			const float = context.peek()
 			const ifFalse = context.resolvePop()
-			let ifFalseDatum: asm.Datum | undefined
-			if (ifFalse) ifFalseDatum = {type: 'register', register: ifFalse}
-			if (!ifFalse || float) {
-				// Put floats in an int register so we can use a cmov instruction
-				const newIfFalse = INT_INTERMEDIATE_REGISTERS[1]
-				const newDatum: asm.Datum = {type: 'register', register: newIfFalse}
-				output.push(ifFalse
-					? new asm.MoveInstruction(ifFalseDatum!, newDatum, 'q')
-					: new asm.PopInstruction(newIfFalse)
-				)
-				ifFalseDatum = newDatum
+			let ifFalseDatum: asm.Datum
+			if (ifFalse) {
+				ifFalseDatum = {type: 'register', register: ifFalse}
+				if (float) {
+					// Put floats in an int register so we can use a cmov instruction
+					const newIfFalse = INT_INTERMEDIATE_REGISTERS[1]
+					const newDatum: asm.Datum = {type: 'register', register: newIfFalse}
+					output.push(new asm.MoveInstruction(ifFalseDatum, newDatum, 'q'))
+					ifFalseDatum = newDatum
+				}
+			}
+			else {
+				output.push(new asm.AddInstruction(
+					{type: 'immediate', value: 8},
+					{type: 'register', register: 'rsp'}
+				))
+				ifFalseDatum = {...STACK_TOP, immediate: -8}
 			}
 			const ifTrue = context.resolvePop() // also where the result will go
-			const ifTrueDatum: asm.Datum | undefined =
-				ifTrue ? {type: 'register', register: ifTrue} : undefined
-			const onStack = !ifTrue
-			let ifTrueNewDatum: asm.Datum
-			if (onStack || float) {
+			const ifTrueDatum: asm.Datum =
+				ifTrue ? {type: 'register', register: ifTrue} : STACK_TOP
+			let ifTrueNewDatum: asm.Datum | undefined
+			if (float || !ifTrue) {
+				// Move result to an int register so we can use a cmov instruction
 				const newIfTrue = INT_INTERMEDIATE_REGISTERS[2]
-				const newDatum: asm.Datum = {type: 'register', register: newIfTrue}
-				output.push(onStack
-					? new asm.PopInstruction(newIfTrue)
-					: new asm.MoveInstruction(ifTrueDatum!, newDatum, 'q')
-				)
-				ifTrueNewDatum = newDatum
+				ifTrueNewDatum = {type: 'register', register: newIfTrue}
+				output.push(new asm.MoveInstruction(ifTrueDatum, ifTrueNewDatum, 'q'))
 			}
-			else ifTrueNewDatum = ifTrueDatum!
 			output.push(
 				new asm.TestInstruction(condDatum, condDatum),
-				new asm.CMoveInstruction(ifFalseDatum!, ifTrueNewDatum, 'e')
+				new asm.CMoveInstruction(ifFalseDatum, ifTrueNewDatum || ifTrueDatum, 'e')
 			)
-			if (onStack) output.push(new asm.PushInstruction(ifTrue!))
-			else if (float) {
-				output.push(new asm.MoveInstruction(ifTrueNewDatum, ifTrueDatum!, 'q'))
+			if (ifTrueNewDatum) {
+				output.push(new asm.MoveInstruction(ifTrueNewDatum, ifTrueDatum, 'q'))
 			}
 			context.push(float)
 			break
