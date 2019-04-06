@@ -137,8 +137,14 @@ export class AndNotPackedInstruction extends SrcDestInstruction {
 	get packed() { return true }
 }
 export class CallInstruction {
-	constructor(readonly target: string) {}
-	get str() { return 'call ' + this.target }
+	constructor(readonly target: string | Datum) {}
+	get str() {
+		const {target} = this
+		const targetString = typeof target === 'string'
+			? target
+			: '*' + datumToString(target)
+		return 'call ' + targetString
+	}
 }
 export class CdqInstruction {
 	get str() { return 'cdq' }
@@ -198,6 +204,9 @@ export class ImulInstruction extends SrcDestInstruction {
 export class JumpInstruction {
 	constructor(readonly target: string, readonly cond?: JumpCond) {}
 	get str() { return `j${this.cond || 'mp'} ${this.target}` }
+}
+export class LeaInstruction extends SrcDestInstruction {
+	get op() { return 'lea' }
 }
 export class LeaveInstruction {
 	get str() { return 'leave' }

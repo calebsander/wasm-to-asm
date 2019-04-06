@@ -23,6 +23,7 @@ const TESTS = [
 	'i32',
 	'i64',
 	'int_exprs',
+	'left-to-right',
 	'memory',
 	'memory_redundancy',
 	'stack'
@@ -159,7 +160,7 @@ function getValue(expression: SExpression) {
 			`
 			const hFilePath = wasmPath.replace('.wasm', '.h')
 			const headerFile = await readFile(hFilePath, 'utf8')
-			const initFunction = `wasm_${test}_init_module`
+			const initFunction = `wasm_${test.replace(INVALID_EXPORT_CHAR, '_')}_init_module`
 			const hasInit = headerFile.includes(`void ${initFunction}(void);`)
 			if (hasInit) cFile += initFunction + '();\n'
 			let asserts = nextModule < 0
@@ -187,7 +188,7 @@ function getValue(expression: SExpression) {
 						const funcNameMatch = FUNC_NAME.exec(func.atom)
 						if (!funcNameMatch) throw new Error('Not a function name: ' + func.atom)
 						const funcName =
-							`wasm_${test}_${funcNameMatch[1].replace(INVALID_EXPORT_CHAR, '_')}`
+							`wasm_${test}_${funcNameMatch[1]}`.replace(INVALID_EXPORT_CHAR, '_')
 						const functionCall = `${funcName}(${funcArgs.map(getValue).join(', ')})`
 						if (expected) {
 							const value = getValue(expected)
