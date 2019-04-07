@@ -504,14 +504,12 @@ function relocateArguments(
 	return {toRestore, instructions}
 }
 function compileBranch(nesting: number, context: CompilationContext, output: asm.AssemblyInstruction[]): string {
-	let {label, intStackHeight, floatStackHeight, result} =
+	const {label, intStackHeight, floatStackHeight, result} =
 		context.getNestedLabel(nesting)
 	let resultRegister: asm.Register | undefined
 	let float: boolean
 	if (result) {
 		float = isFloat(result)
-		if (float) floatStackHeight++
-		else intStackHeight++
 		if (context.getStackHeight(float) > (float ? floatStackHeight : intStackHeight)) {
 			[resultRegister] =
 				float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS

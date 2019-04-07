@@ -9,6 +9,8 @@ const C_NAN = 'NAN'
 const SUCCESS = 'success'
 const TESTS = [
 	'address',
+	'block',
+	'br',
 	'endianness',
 	'f32',
 	'f32_bitwise',
@@ -30,6 +32,7 @@ const TESTS = [
 	'memory',
 	'memory_grow',
 	'memory_redundancy',
+	'memory_size',
 	'stack'
 ]
 const FUNC_NAME = /^"(.+)"$/
