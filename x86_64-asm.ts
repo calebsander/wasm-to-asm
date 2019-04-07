@@ -194,10 +194,6 @@ export class DivInstruction {
 export class DivBinaryInstruction extends SrcDestInstruction {
 	get op() { return 'div' }
 }
-export class EnterInstruction {
-	constructor(readonly frameSize: number) {}
-	get str() { return `enter $${this.frameSize}, $0` }
-}
 export class ImulInstruction extends SrcDestInstruction {
 	get op() { return 'imul' }
 }
@@ -207,9 +203,6 @@ export class JumpInstruction {
 }
 export class LeaInstruction extends SrcDestInstruction {
 	get op() { return 'lea' }
-}
-export class LeaveInstruction {
-	get str() { return 'leave' }
 }
 export class LzcntInstruction extends SrcDestInstruction {
 	get op() { return 'lzcnt' }

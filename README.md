@@ -150,11 +150,6 @@ Floats are stored individually in the lower 32 or 64 bits of the SIMD registers.
 (`%xmm0` was chosen because float return values are placed there. `%xmm15` was chosen because it is not used for function arguments in SysV, so params can be temporarily placed there while being moved between registers.)
 Registers `%xmm2` to `%xmm14` are used to store local variables and the bottom of the float computation stack.
 
-#### `%rbp`
-If the local variables or computation stack overflow the registers, the rest are stored on the stack and `%rbp` is used as a base pointer.
-Otherwise, `%rbp` is used as an integer register.
-This means that functions with few locals can have most of their computations performed on registers instead of the stack.
-
 #### Example
 Consider a function with the following local variables:
 - `(param $f f64) (param $i i32)`

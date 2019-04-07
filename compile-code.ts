@@ -11,7 +11,6 @@ const flatten = <A>(sections: A[][]) => ([] as A[]).concat(...sections)
 
 const INT_INTERMEDIATE_REGISTERS: asm.Register[] = ['rax', 'rcx', 'rdx']
 const [INT_RESULT_REGISTER] = INT_INTERMEDIATE_REGISTERS
-const BASE_POINTER_REGISTER: asm.Register = 'rbp'
 const INT_GENERAL_REGISTERS: asm.Register[] = [
 	'rdi', 'rsi',
 	'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15',
@@ -39,10 +38,13 @@ const FLOAT_GENERAL_REGISTERS = new Array(16 - FLOAT_INTERMEDIATE_COUNT)
 
 export const INVALID_EXPORT_CHAR = /[^A-Za-z0-9_]/g
 
-class BPRelative {
-	constructor(public readonly index: number) {}
+class SPRelative {
+	private readonly stackOffset: number
+	constructor(index: number, stackValues: number) {
+		this.stackOffset = stackValues - index - 1
+	}
 	get datum(): asm.Datum {
-		return {type: 'indirect', register: 'rbp', immediate: -(this.index + 1) << 3}
+		return {...STACK_TOP, immediate: this.stackOffset << 3}
 	}
 }
 
@@ -75,6 +77,8 @@ const getFunctionStats =
 		locals,
 		result: (results as [ValueType?])[0]
 	})
+const getGeneralRegisters = (float: boolean) =>
+	float ? FLOAT_GENERAL_REGISTERS : INT_GENERAL_REGISTERS
 
 interface ImportReference {
 	modulePrefix: string
@@ -231,7 +235,6 @@ class CompilationContext {
 	private floatStackHeight = 0
 	private maxIntStackHeight = 0
 	private maxFloatStackHeight = 0
-	private intRegisters: ReadonlyArray<asm.Register>
 	private labelCount = 0
 	private readonly containingLabels: BlockReference[] = []
 
@@ -250,12 +253,6 @@ class CompilationContext {
 		this.params = params.map(getLocalLocation)
 		this.locals = locals.map(getLocalLocation)
 		this.result = result
-		this.intRegisters = INT_GENERAL_REGISTERS
-		if (this.usesBP) {
-			this.intRegisters = this.intRegisters.filter(
-				register => register !== BASE_POINTER_REGISTER
-			)
-		}
 	}
 
 	push(float: boolean): void {
@@ -281,33 +278,42 @@ class CompilationContext {
 		if (!stackHeight) throw new Error('Empty stack')
 		return this.stackFloats[stackHeight - 1]
 	}
-	getParam(paramIndex: number) {
-		return (this.params as (LocalLocation | undefined)[])[paramIndex] ||
-			this.locals[paramIndex - this.params.length]
+	private localsAndStackHeight(float: boolean): number {
+		return float
+			? this.floatLocalCount + this.floatStackHeight
+			: this.intLocalCount + this.intStackHeight
 	}
-	resolveParam(paramIndex: number): asm.Register | BPRelative {
+	getParam(paramIndex: number) {
+		const localIndex = paramIndex - this.params.length
+		return localIndex < 0 ? this.params[paramIndex] : this.locals[localIndex]
+	}
+	resolveParam(paramIndex: number): asm.Register | SPRelative {
 		const {float, index} = this.getParam(paramIndex)
-		const generalRegisters = float ? FLOAT_GENERAL_REGISTERS : this.intRegisters
-		return (generalRegisters as (asm.Register | undefined)[])[index] ||
-			new BPRelative( // all float registers are stored after all int registers
-				index - generalRegisters.length + (float ? this.bpInts : 0)
-			)
+		const generalRegisters = getGeneralRegisters(float)
+		const stackIndex = index - generalRegisters.length
+		return stackIndex < 0
+			? generalRegisters[index]
+			: new SPRelative( // all floats are stored after all ints
+					float ? this.stackIntLocals + stackIndex : stackIndex,
+					this.getStackValues(this.localsAndStackHeight(false), false) +
+					this.getStackValues(this.localsAndStackHeight(true), true)
+				)
 	}
 	resolveParamDatum(index: number): asm.Datum {
 		const resolved = this.resolveParam(index)
-		return resolved instanceof BPRelative
+		return resolved instanceof SPRelative
 			? resolved.datum
 			: {type: 'register', register: resolved}
 	}
-	resolveLocal(index: number): asm.Register | BPRelative {
+	resolveLocal(index: number): asm.Register | SPRelative {
 		return this.resolveParam(this.params.length + index)
 	}
+	resolveLocalDatum(index: number): asm.Datum {
+		return this.resolveParamDatum(this.params.length + index)
+	}
 	private resolveStackTop(float: boolean): asm.Register | undefined {
-		const generalRegisters = float ? FLOAT_GENERAL_REGISTERS : this.intRegisters
-		const index = float
-			? this.floatLocalCount + this.floatStackHeight
-			: this.intLocalCount + this.intStackHeight
-		return (generalRegisters as (asm.Register | undefined)[])[index]
+		return (getGeneralRegisters(float) as (asm.Register | undefined)[])
+			[this.localsAndStackHeight(float)]
 	}
 	resolvePush(float: boolean): asm.Register | undefined {
 		const resolved = this.resolveStackTop(float)
@@ -325,8 +331,7 @@ class CompilationContext {
 			const {params} = this
 			for (let i = 0; i < params.length; i++) {
 				const resolved = this.resolveParam(i)
-				if (resolved instanceof BPRelative) return toSave
-				toSave.push(resolved)
+				if (!(resolved instanceof SPRelative)) toSave.push(resolved)
 			}
 		}
 		const {
@@ -336,8 +341,7 @@ class CompilationContext {
 		} = this
 		for (let i = 0; i < locals.length; i++) {
 			const resolved = this.resolveLocal(i)
-			if (resolved instanceof BPRelative) return toSave
-			toSave.push(resolved)
+			if (!(resolved instanceof SPRelative)) toSave.push(resolved)
 		}
 		let intStackHeight: number, floatStackHeight: number
 		if (wholeFunction) {
@@ -388,19 +392,19 @@ class CompilationContext {
 		this.containingLabels.pop()
 	}
 	getNestedLabel(nesting: number): BlockReference {
-		return this.containingLabels[this.containingLabels.length - 1 - nesting]
+		return this.containingLabels.slice(-(nesting + 1))[0]
 	}
-	get bpInts(): number {
-		return Math.max(this.intLocalCount - this.intRegisters.length, 0)
+	private getStackValues(totalValues: number, float: boolean): number {
+		return Math.max(totalValues - getGeneralRegisters(float).length, 0)
 	}
-	get bpFloats(): number {
-		return Math.max(this.floatLocalCount - FLOAT_GENERAL_REGISTERS.length, 0)
+	private get stackIntLocals(): number {
+		return this.getStackValues(this.intLocalCount, false)
+	}
+	private get stackFloatLocals(): number {
+		return this.getStackValues(this.floatLocalCount, true)
 	}
 	get stackLocals(): number {
-		return this.bpInts + this.bpFloats
-	}
-	get usesBP(): boolean {
-		return !!this.stackLocals
+		return this.stackIntLocals + this.stackFloatLocals
 	}
 }
 
@@ -488,9 +492,9 @@ function relocateArguments(
 	}
 	return {toRestore, instructions}
 }
-function compileBranch(nestDepth: number, context: CompilationContext, output: asm.AssemblyInstruction[]) {
+function compileBranch(nesting: number, context: CompilationContext, output: asm.AssemblyInstruction[]) {
 		let {label, intStackHeight, floatStackHeight, result} =
-			context.getNestedLabel(nestDepth)
+			context.getNestedLabel(nesting)
 		let resultRegister: asm.Register | undefined
 		let float: boolean
 		if (result) {
@@ -774,7 +778,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			for (let i = params.length - 1; i >= 0; i--) {
 				const source = context.resolvePop()
 				const target = otherContext.resolveParam(i)
-				const datum: asm.Datum = target instanceof BPRelative
+				const datum: asm.Datum = target instanceof SPRelative
 					? target.datum
 					: {type: 'register', register: target}
 				if (source) moves.set(source, datum)
@@ -906,7 +910,7 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 			const {float} = context.getParam(local)
 			const resolvedLocal = context.resolveParam(local)
 			let target = context.resolvePush(float)
-			if (resolvedLocal instanceof BPRelative) {
+			if (resolvedLocal instanceof SPRelative) {
 				const push = !target
 				if (push) {
 					[target] = float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
@@ -945,12 +949,12 @@ function compileInstruction(instruction: Instruction, context: CompilationContex
 					: new asm.PopInstruction(value)
 				)
 			}
+			if (tee) context.push(float)
 			output.push(new asm.MoveInstruction(
 				{type: 'register', register: value!},
 				context.resolveParamDatum(local),
 				'q'
 			))
-			if (tee) context.push(float)
 			break
 		}
 		case 'get_global': {
@@ -2021,15 +2025,15 @@ export function compileModule(
 		for (const register of registersUsed) {
 			setupInstructions.push(new asm.PushInstruction(register))
 		}
-		const {result, usesBP} = context
-		if (usesBP) {
-			setupInstructions.push(new asm.EnterInstruction(context.stackLocals << 3))
+		const {result, stackLocals} = context
+		if (stackLocals) {
+			setupInstructions.push(new asm.SubInstruction(
+				{type: 'immediate', value: stackLocals << 3},
+				{type: 'register', register: 'rsp'}
+			))
 		}
 		context.locals.forEach(({float}, i) => {
-			const location = context.resolveLocal(i)
-			const datum: asm.Datum = location instanceof BPRelative
-				? location.datum
-				: {type: 'register', register: location}
+			const datum = context.resolveLocalDatum(i)
 			const zeroDatum: asm.Datum = float
 				? {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
 				: datum
@@ -2056,7 +2060,12 @@ export function compileModule(
 			)
 		}
 		unwindStack(0, 0, context, returnInstructions)
-		if (usesBP) returnInstructions.push(new asm.LeaveInstruction)
+		if (stackLocals) {
+			returnInstructions.push(new asm.AddInstruction(
+				{type: 'immediate', value: stackLocals << 3},
+				{type: 'register', register: 'rsp'}
+			))
+		}
 		for (const register of reverse(registersUsed)) {
 			returnInstructions.push(new asm.PopInstruction(register))
 		}
