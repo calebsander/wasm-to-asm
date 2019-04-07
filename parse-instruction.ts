@@ -5,10 +5,13 @@ import {
 	parseByte,
 	parseChoice,
 	parseExact,
+	parseIgnore,
 	parseMap,
 	parseReturn,
+	parseUnsigned,
+	parseUntil,
 	parseVector,
-	parseUnsigned
+	parseWhile
 } from './parse'
 import {ValueType, parseValueType} from './parse-value-type'
 
@@ -211,121 +214,69 @@ export type Instruction
 	| MemoryInstruction
 	| NumericInstruction
 
+const BODY_END = 0x0B
+
 const instructionParsers = new Map<number, Parser<Instruction>>()
 export const parseInstruction = parseByOpcode(instructionParsers)
-export const parseBody: Parser<Instruction[]> = parseChoice([
-	parseMap(parseExact(0x0B), _ => []),
-	parseAndThen(
-		parseInstruction,
-		instruction => parseMap(
-			parseBody,
-			instructions => [instruction, ...instructions]
-		)
+export const parseBody = parseUntil(parseInstruction, parseExact(BODY_END))
+const parseIfBody =
+	parseAndThen(parseWhile(parseInstruction), ifInstructions =>
+		parseByOpcode(new Map([
+			[0x05, parseMap(parseBody, elseInstructions =>
+				({ifInstructions, elseInstructions})
+			)],
+			[BODY_END, parseReturn({ifInstructions, elseInstructions: []})]
+		]))
 	)
-])
-interface IfBody {
-	ifInstructions: Instruction[]
-	elseInstructions: Instruction[]
-}
-const parseIfBody: Parser<IfBody> = parseChoice([
-	parseByOpcode(new Map<number, Parser<IfBody>>([
-		[0x0B, parseReturn({ifInstructions: [], elseInstructions: []})],
-		[0x05, parseMap(
-			parseBody,
-			elseInstructions => ({ifInstructions: [], elseInstructions})
-		)]
-	])),
-	parseAndThen(
-		parseInstruction,
-		instruction => parseMap(
-			parseIfBody,
-			({ifInstructions, elseInstructions}) => ({
-				ifInstructions: [instruction, ...ifInstructions],
-				elseInstructions
-			})
-		)
-	)
-])
 const parseResultType = parseChoice([
-	parseMap(parseExact(0x40), (_): ResultType => 'empty'),
+	parseIgnore(parseExact(0x40), parseReturn('empty')),
 	parseValueType
 ])
 const parseBlockLike = (type: 'block' | 'loop') =>
-	parseAndThen(
-		parseResultType,
-		returns => parseMap(
-			parseBody,
-			(instructions): Instruction => ({type, returns, instructions})
-		)
+	parseAndThen(parseResultType, returns =>
+		parseMap(parseBody, instructions => ({type, returns, instructions}))
 	)
+const parseBranchLike = (type: 'br' | 'br_if') =>
+	parseMap(parseUnsigned, label => ({type, label}))
 const parseFixedInstruction = <TYPE extends string>(type: TYPE) =>
 	parseReturn({type})
-const parseSigned: Parser<bigint> = parseAndThen(
-	parseByte,
-	n =>
-		n & 0b10000000
-			? parseMap(
-					parseSigned,
-					m => m << 7n | BigInt(n & 0b01111111)
-				)
-			: parseReturn(BigInt(n << 25 >> 25)) // sign-extend bit 6
+const parseSigned: Parser<bigint> = parseAndThen(parseByte, n =>
+	n & 0b10000000
+		? parseMap(parseSigned, m =>
+				m << 7n | BigInt.asUintN(7, BigInt(n))
+			)
+		: parseReturn(BigInt.asIntN(7, BigInt(n))) // sign-extend lower 7 bits
 )
 const parseLocalInstruction = <TYPE extends string>(type: TYPE) =>
 	parseMap(parseUnsigned, local => ({type, local}))
 const parseGlobalInstruction = <TYPE extends string>(type: TYPE) =>
 	parseMap(parseUnsigned, global => ({type, global}))
-const parseMemoryAccess = parseAndThen(
-	parseUnsigned,
-	align => parseMap(
-		parseUnsigned,
-		offset => ({align, offset})
-	)
+const parseMemoryAccess = parseAndThen(parseUnsigned, align =>
+	parseMap(parseUnsigned, offset => ({align, offset}))
 )
 const parseMemoryInstruction = <TYPE extends string>(type: TYPE) =>
 	parseMap(parseMemoryAccess, access => ({type, access}))
 
-const MEMORY_SIZE: Instruction = {type: 'memory.size'}
-const MEMORY_GROW: Instruction = {type: 'memory.grow'}
-
-for (const [opcode, parser] of [
+const opcodeParsers: [number, Parser<Instruction>][] = [
 	[0x00, parseFixedInstruction('unreachable')],
 	[0x01, parseFixedInstruction('nop')],
 	[0x02, parseBlockLike('block')],
 	[0x03, parseBlockLike('loop')],
-	[0x04, parseAndThen(
-		parseResultType,
-		returns => parseMap(
-			parseIfBody,
-			(ifBody): Instruction =>
-				({type: 'if', returns, ...ifBody})
+	[0x04, parseAndThen(parseResultType, returns =>
+		parseMap(parseIfBody, ifBody => ({type: 'if', returns, ...ifBody}))
+	)],
+	[0x0C, parseBranchLike('br')],
+	[0x0D, parseBranchLike('br_if')],
+	[0x0E, parseAndThen(parseVector(parseUnsigned), cases =>
+		parseMap(parseUnsigned, defaultCase =>
+			({type: 'br_table', cases, defaultCase})
 		)
 	)],
-	[0x0C, parseMap(
-		parseUnsigned,
-		(label): Instruction => ({type: 'br', label})
-	)],
-	[0x0D, parseMap(
-		parseUnsigned,
-		(label): Instruction => ({type: 'br_if', label})
-	)],
-	[0x0E, parseAndThen(
-		parseVector(parseUnsigned),
-		cases => parseMap(
-			parseUnsigned,
-			(defaultCase): Instruction =>
-				({type: 'br_table', cases, defaultCase})
-		)
-	)],
-	[0x0F, parseReturn<Instruction>({type: 'return'})],
-	[0x10, parseMap(
-		parseUnsigned,
-		(func): Instruction => ({type: 'call', func})
-	)],
-	[0x11, parseAndThen(
-		parseUnsigned,
-		funcType => parseMap(
-			parseExact(0x00),
-			(_): Instruction => ({type: 'call_indirect', funcType})
+	[0x0F, parseFixedInstruction('return')],
+	[0x10, parseMap(parseUnsigned, func => ({type: 'call', func}))],
+	[0x11, parseAndThen(parseUnsigned, funcType =>
+		parseIgnore(parseExact(0x00),
+			parseReturn({type: 'call_indirect', funcType})
 		)
 	)],
 
@@ -361,24 +312,18 @@ for (const [opcode, parser] of [
 	[0x3C, parseMemoryInstruction('i64.store8')],
 	[0x3D, parseMemoryInstruction('i64.store16')],
 	[0x3E, parseMemoryInstruction('i64.store32')],
-	[0x3F, parseMap(parseExact(0x00), _ => MEMORY_SIZE)],
-	[0x40, parseMap(parseExact(0x00), _ => MEMORY_GROW)],
+	[0x3F, parseIgnore(parseExact(0x00), parseFixedInstruction('memory.size'))],
+	[0x40, parseIgnore(parseExact(0x00), parseFixedInstruction('memory.grow'))],
 
-	[0x41, parseMap(
-		parseSigned,
-		(n): Instruction => ({type: 'i32.const', value: Number(n)})
-	)],
-	[0x42, parseMap(
-		parseSigned,
-		(value): Instruction => ({type: 'i64.const', value})
-	)],
+	[0x41, parseMap(parseSigned, n => ({type: 'i32.const', value: Number(n)}))],
+	[0x42, parseMap(parseSigned, value => ({type: 'i64.const', value}))],
 	[0x43, parseMap(
 		data => ({value: data.getFloat32(0, true), length: 4}),
-		(value): Instruction => ({type: 'f32.const', value})
+		value => ({type: 'f32.const', value})
 	)],
 	[0x44, parseMap(
 		data => ({value: data.getFloat64(0, true), length: 8}),
-		(value): Instruction => ({type: 'f64.const', value})
+		value => ({type: 'f64.const', value})
 	)],
 
 	[0x45, parseFixedInstruction('i32.eqz')],
@@ -512,4 +457,7 @@ for (const [opcode, parser] of [
 	[0xBD, parseFixedInstruction('i64.reinterpret')],
 	[0xBE, parseFixedInstruction('f32.reinterpret')],
 	[0xBF, parseFixedInstruction('f64.reinterpret')]
-] as [number, Parser<Instruction>][]) instructionParsers.set(opcode, parser)
+]
+for (const [opcode, parser] of opcodeParsers) {
+	instructionParsers.set(opcode, parser)
+}
