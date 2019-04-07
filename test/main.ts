@@ -24,6 +24,9 @@ const TESTS = [
 	'i64',
 	'int_exprs',
 	'left-to-right',
+	'local_get',
+	'local_set',
+	'local_tee',
 	'memory',
 	'memory_redundancy',
 	'stack'
