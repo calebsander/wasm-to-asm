@@ -97,6 +97,7 @@ class ModuleContext {
 	private readonly importGlobalTypes: ValueType[] = []
 	private types: FunctionType[] | undefined
 	private readonly functionStats = new Map<number, FunctionStats>()
+	private memoryMax: number | undefined
 
 	constructor(
 		readonly index: number,
@@ -222,6 +223,13 @@ class ModuleContext {
 	}
 	get memoryStart(): number {
 		return 0x100000000 * (this.index + 1)
+	}
+	setMemoryMax(max?: number): void {
+		this.memoryMax = max
+	}
+	get maxPages(): number {
+		// Can't have more than 2 ** 32 / 2 ** 16 == 2 ** 16 pages
+		return this.memoryMax === undefined ? 1 << 16 : this.memoryMax
 	}
 }
 class CompilationContext {
@@ -369,7 +377,10 @@ class CompilationContext {
 		return this.index
 	}
 	makeLabel(prefix: string): string {
-		return `${this.moduleContext.functionLabel(this.functionIndex)}_${prefix}${++this.labelCount}`
+		const functionLabel = this.index === undefined
+			? 'GLOBAL'
+			: this.moduleContext.functionLabel(this.index)
+		return `${functionLabel}_${prefix}${++this.labelCount}`
 	}
 	getStackHeight(float: boolean): number {
 		return float ? this.floatStackHeight : this.intStackHeight
@@ -556,10 +567,10 @@ const MMAP_SYSCALL_REGISTERS =
 	.filter(register => INT_GENERAL_REGISTERS.includes(register))
 const MMAP_SYSCALL_REGISTER_SET = new Set(MMAP_SYSCALL_REGISTERS)
 const SYSCALL_DATUM: asm.Datum = {type: 'register', register: 'rax'},
-	MMAP_ADDR_DATUM = {type: 'register' as const, register: 'rdi' as const},
+	MMAP_ADDR_DATUM = {type: 'register' as const, register: 'rdi' as asm.Register},
 	MMAP_ADDR_INTERMEDIATE: asm.Datum =
 		{type: 'register', register: INT_INTERMEDIATE_REGISTERS[2]},
-	MMAP_LENGTH_DATUM: asm.Datum = {type: 'register', register: 'rsi'},
+	MMAP_LENGTH_DATUM = {type: 'register' as const, register: 'rsi' as asm.Register},
 	MMAP_PROT_DATUM: asm.Datum = {type: 'register', register: 'rdx'},
 	MMAP_FLAGS_DATUM: asm.Datum = {type: 'register', register: 'r10'},
 	MMAP_FD_DATUM: asm.Datum = {type: 'register', register: 'r8'},
@@ -1144,6 +1155,7 @@ function compileInstruction(
 		case 'memory.grow': {
 			let pages = context.resolvePop()
 			if (!pages || MMAP_SYSCALL_REGISTER_SET.has(pages)) {
+				// %rax and %rdx are used for mmap() arguments
 				const newPages = INT_INTERMEDIATE_REGISTERS[1]
 				output.push(pages
 					? new asm.MoveInstruction(
@@ -1154,17 +1166,33 @@ function compileInstruction(
 				)
 				pages = newPages
 			}
-			const registersUsed = new Set(context.registersUsed())
-			const toRestore: asm.Register[] = []
-			for (const register of MMAP_SYSCALL_REGISTERS) {
-				if (registersUsed.has(register)) {
-					output.push(new asm.PushInstruction(register))
-					toRestore.push(register)
-				}
-			}
-			const sizeLabel: asm.Datum = {type: 'label', label: context.moduleContext.memorySizeLabel}
+			const pagesDatum: asm.Datum = {type: 'register', register: pages, width: 'l'}
+			const totalPagesDatum: asm.Datum =
+				{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0], width: 'l'}
+			const {moduleContext} = context
+			const sizeLabel: asm.Datum = {type: 'label', label: moduleContext.memorySizeLabel}
+			const failLabel = context.makeLabel('MMAP_FAIL'),
+			      skipLabel = context.makeLabel('MMAP_SKIP'),
+			      endLabel = context.makeLabel('MMAP_SKIP_END')
 			output.push(
-				new asm.PushInstruction(pages), // save the number of pages added
+				new asm.TestInstruction(pagesDatum, pagesDatum),
+				new asm.JumpInstruction(skipLabel, 'e'), // mmap() of 0 pages isn't allowed
+				new asm.MoveInstruction(sizeLabel, totalPagesDatum),
+				new asm.AddInstruction(pagesDatum, totalPagesDatum),
+				new asm.CmpInstruction(
+					{type: 'immediate', value: moduleContext.maxPages}, totalPagesDatum
+				),
+				new asm.JumpInstruction(failLabel, 'a')
+			)
+			const registersUsed = new Set(context.registersUsed())
+			const toRestore = [pages]
+			for (const register of MMAP_SYSCALL_REGISTERS) {
+				if (registersUsed.has(register)) toRestore.push(register)
+			}
+			for (const register of toRestore) {
+				output.push(new asm.PushInstruction(register))
+			}
+			output.push(
 				new asm.MoveInstruction(
 					{type: 'immediate', value: asm.SYSCALL.mmap},
 					SYSCALL_DATUM
@@ -1176,25 +1204,35 @@ function compileInstruction(
 					MMAP_ADDR_INTERMEDIATE
 				),
 				new asm.AddInstruction(MMAP_ADDR_INTERMEDIATE, MMAP_ADDR_DATUM),
-				new asm.MoveInstruction({type: 'register', register: pages}, MMAP_LENGTH_DATUM),
+				new asm.MoveInstruction(pagesDatum, {...MMAP_LENGTH_DATUM, width: 'l'}),
 				new asm.ShlInstruction(PAGE_BITS, MMAP_LENGTH_DATUM),
 				new asm.MoveInstruction(PROT_READ_WRITE, MMAP_PROT_DATUM),
 				new asm.MoveInstruction(MMAP_FLAGS, MMAP_FLAGS_DATUM),
 				new asm.MoveInstruction({type: 'immediate', value: -1}, MMAP_FD_DATUM),
 				new asm.XorInstruction(MMAP_OFFSET_DATUM, MMAP_OFFSET_DATUM),
-				new asm.SysCallInstruction,
-				new asm.PopInstruction(pages)
+				new asm.SysCallInstruction
 			)
-			for (const register of reverse(toRestore)) output.push(new asm.PopInstruction(register))
-			let target = context.resolvePush(false)
-			const push = !target
-			if (push) [target] = INT_INTERMEDIATE_REGISTERS
+			for (const register of reverse(toRestore)) {
+				output.push(new asm.PopInstruction(register))
+			}
+			let result = context.resolvePush(false)
+			const push = !result
+			if (push) result = INT_INTERMEDIATE_REGISTERS[0]
+			const datum: asm.Datum = {type: 'register', register: result!, width: 'l'}
 			output.push(
-				new asm.MoveInstruction(sizeLabel, {type: 'register', register: target!, width: 'l'}),
-				new asm.AddInstruction({type: 'register', register: pages, width: 'l'}, sizeLabel)
+				new asm.TestInstruction(SYSCALL_DATUM, SYSCALL_DATUM), // mmap() == -1 indicates failure
+				new asm.JumpInstruction(failLabel, 'l'),
+				new asm.MoveInstruction(sizeLabel, datum),
+				new asm.AddInstruction(pagesDatum, sizeLabel),
+				new asm.JumpInstruction(endLabel),
+				new asm.Label(failLabel),
+				new asm.MoveInstruction({type: 'immediate', value: -1}, datum),
+				new asm.JumpInstruction(endLabel),
+				new asm.Label(skipLabel),
+				new asm.MoveInstruction(sizeLabel, datum),
+				new asm.Label(endLabel)
 			)
-			if (push) output.push(new asm.PushInstruction(target!))
-			// TODO: handle mmap failure (return -1)
+			if (push) output.push(new asm.PushInstruction(result!))
 			break
 		}
 		case 'i32.const':
@@ -1908,11 +1946,15 @@ export function compileModule(
 				memoriesCount += memories.length
 				if (memoriesCount > 1) throw new Error('Multiple memories')
 				if (!memoriesCount) break
-				initInstructions.push(
-					{type: 'i32.const', value: memories[0].min},
-					{type: 'memory.grow'},
-					{type: 'drop'}
-				)
+				const [{min, max}] = memories
+				if (min) {
+					initInstructions.push(
+						{type: 'i32.const', value: min},
+						{type: 'memory.grow'},
+						{type: 'drop'}
+					)
+				}
+				moduleContext.setMemoryMax(max)
 				break
 			case 'global':
 				const {globals} = section

@@ -28,6 +28,7 @@ const TESTS = [
 	'local_set',
 	'local_tee',
 	'memory',
+	'memory_grow',
 	'memory_redundancy',
 	'stack'
 ]
@@ -106,6 +107,7 @@ function getValue(expression: SExpression) {
 		case 'i64.const':
 		case 'f32.const':
 		case 'f64.const': {
+			value = value.replace(/_/g, '')
 			if (value === 'inf' || value === '-inf') {
 				return value.replace('inf', 'INFINITY')
 			}
