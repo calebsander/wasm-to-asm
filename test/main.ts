@@ -11,6 +11,8 @@ const TESTS = [
 	'address',
 	'block',
 	'br',
+	// 'br_if', this test requires infering that the branch is always taken in (i32.const 1) (br_if 0)
+	'br_table',
 	'endianness',
 	'f32',
 	'f32_bitwise',

@@ -56,6 +56,7 @@ const isFloat = (type: ValueType): boolean =>
 	type[0] === 'f'
 
 interface BlockReference {
+	loop: boolean // whether inside a loop
 	label: string
 	intStackHeight: number
 	floatStackHeight: number
@@ -69,6 +70,11 @@ interface FunctionStats {
 interface LocalLocation {
 	float: boolean
 	index: number
+}
+interface StackState {
+	intStackHeight: number
+	floatStackHeight: number
+	stackFloats: boolean[]
 }
 
 const getFunctionStats =
@@ -238,7 +244,7 @@ class CompilationContext {
 	readonly result?: ValueType
 	private intLocalCount = 0
 	private floatLocalCount = 0
-	private readonly stackFloats: boolean[] = []
+	private stackFloats: boolean[] = []
 	private intStackHeight = 0
 	private floatStackHeight = 0
 	private maxIntStackHeight = 0
@@ -291,6 +297,12 @@ class CompilationContext {
 			? this.floatLocalCount + this.floatStackHeight
 			: this.intLocalCount + this.intStackHeight
 	}
+	private getValuesAfterRegisters(totalValues: number, float: boolean): number {
+		return Math.max(totalValues - getGeneralRegisters(float).length, 0)
+	}
+	getValuesOnStack(float: boolean): number {
+		return this.getValuesAfterRegisters(this.localsAndStackHeight(float), float)
+	}
 	getParam(paramIndex: number) {
 		const localIndex = paramIndex - this.params.length
 		return localIndex < 0 ? this.params[paramIndex] : this.locals[localIndex]
@@ -303,8 +315,7 @@ class CompilationContext {
 			? generalRegisters[index]
 			: new SPRelative( // all floats are stored after all ints
 					float ? this.stackIntLocals + stackIndex : stackIndex,
-					this.getStackValues(this.localsAndStackHeight(false), false) +
-					this.getStackValues(this.localsAndStackHeight(true), true)
+					this.getValuesOnStack(false) + this.getValuesOnStack(true)
 				)
 	}
 	resolveParamDatum(index: number): asm.Datum {
@@ -385,14 +396,21 @@ class CompilationContext {
 	getStackHeight(float: boolean): number {
 		return float ? this.floatStackHeight : this.intStackHeight
 	}
-	setStackHeights(intStackHeight: number, floatStackHeight: number) {
+	get stackState(): StackState {
+		return {
+			intStackHeight: this.intStackHeight,
+			floatStackHeight: this.floatStackHeight,
+			stackFloats: this.stackFloats.slice()
+		}
+	}
+	restoreStackState({intStackHeight, floatStackHeight, stackFloats}: StackState) {
 		this.intStackHeight = intStackHeight
 		this.floatStackHeight = floatStackHeight
-		this.maxIntStackHeight = Math.max(intStackHeight, this.maxIntStackHeight)
-		this.maxFloatStackHeight = Math.max(floatStackHeight, this.maxFloatStackHeight)
+		this.stackFloats = stackFloats.slice()
 	}
-	pushLabel(label: string, returns: ResultType): void {
+	pushLabel(loop: boolean, label: string, returns: ResultType): void {
 		this.containingLabels.push({
+			loop,
 			label,
 			intStackHeight: this.intStackHeight,
 			floatStackHeight: this.floatStackHeight,
@@ -402,17 +420,15 @@ class CompilationContext {
 	popLabel(): void {
 		this.containingLabels.pop()
 	}
-	getNestedLabel(nesting: number): BlockReference {
-		return this.containingLabels.slice(-(nesting + 1))[0]
-	}
-	private getStackValues(totalValues: number, float: boolean): number {
-		return Math.max(totalValues - getGeneralRegisters(float).length, 0)
+	getNestedLabel(nesting: number): BlockReference | undefined {
+		return (this.containingLabels as (BlockReference | undefined)[])
+			[this.containingLabels.length - nesting - 1]
 	}
 	private get stackIntLocals(): number {
-		return this.getStackValues(this.intLocalCount, false)
+		return this.getValuesAfterRegisters(this.intLocalCount, false)
 	}
 	private get stackFloatLocals(): number {
-		return this.getStackValues(this.floatLocalCount, true)
+		return this.getValuesAfterRegisters(this.floatLocalCount, true)
 	}
 	get stackLocals(): number {
 		return this.stackIntLocals + this.stackFloatLocals
@@ -503,40 +519,53 @@ function relocateArguments(
 	}
 	return {toRestore, instructions}
 }
-function compileBranch(nesting: number, context: CompilationContext, output: asm.AssemblyInstruction[]): string {
-	const {label, intStackHeight, floatStackHeight, result} =
-		context.getNestedLabel(nesting)
+function compileBranch(nesting: number, context: CompilationContext, output: asm.AssemblyInstruction[]): string | undefined {
+	const block = context.getNestedLabel(nesting)
+	if (!block) {
+		compileReturn(context, output)
+		return
+	}
+
+	const {loop, label, intStackHeight, floatStackHeight, result} = block
 	let resultRegister: asm.Register | undefined
 	let float: boolean
-	if (result) {
-		float = isFloat(result)
-		if (context.getStackHeight(float) > (float ? floatStackHeight : intStackHeight)) {
+	const saveResult = !(loop || !result)
+	if (saveResult) {
+		float = isFloat(result!)
+		const toPop = context.resolvePop()
+		if (
+			// If the relevant stack needs to be unwound,
+			context.getStackHeight(float) > (float ? floatStackHeight : intStackHeight) ||
+			// or if the other stack needs to be unwound and the result value is on the stack
+			context.getStackHeight(!float) > (float ? intStackHeight : floatStackHeight)
+				&& context.getValuesOnStack(float)
+		) {
+			// Result is going to be moved
 			[resultRegister] =
 				float ? FLOAT_INTERMEDIATE_REGISTERS : INT_INTERMEDIATE_REGISTERS
+			output.push(toPop
+				? new asm.MoveInstruction(
+						{type: 'register', register: toPop},
+						{type: 'register', register: resultRegister},
+						'q'
+					)
+				: new asm.PopInstruction(resultRegister)
+			)
 		}
 	}
-	if (resultRegister) {
-		const toPop = context.resolvePop()
-		output.push(toPop
-			? new asm.MoveInstruction(
-					{type: 'register', register: toPop},
-					{type: 'register', register: resultRegister},
-					'q'
-				)
-			: new asm.PopInstruction(resultRegister)
-		)
-	}
 	unwindStack(intStackHeight, floatStackHeight, context, output)
-	if (resultRegister) {
+	if (saveResult) {
 		const target = context.resolvePush(float!)
-		output.push(target
-			? new asm.MoveInstruction(
-					{type: 'register', register: resultRegister},
-					{type: 'register', register: target},
-					'q'
-				)
-			: new asm.PushInstruction(resultRegister)
-		)
+		if (resultRegister) {
+			output.push(target
+				? new asm.MoveInstruction(
+						{type: 'register', register: resultRegister},
+						{type: 'register', register: target},
+						'q'
+					)
+				: new asm.PushInstruction(resultRegister)
+			)
+		}
 	}
 	output.push(new asm.JumpInstruction(label))
 	return label
@@ -557,6 +586,12 @@ function popResultAndUnwind(context: CompilationContext, output: asm.AssemblyIns
 		)
 	}
 	unwindStack(0, 0, context, output)
+}
+function compileReturn(context: CompilationContext, output: asm.AssemblyInstruction[]) {
+	popResultAndUnwind(context, output)
+	output.push(new asm.JumpInstruction(
+		context.moduleContext.returnLabel(context.functionIndex)
+	))
 }
 
 const STACK_TOP = {type: 'indirect' as const, register: 'rsp' as asm.Register}
@@ -674,12 +709,11 @@ function compileInstruction(
 		case 'block':
 		case 'loop': {
 			const {type, returns, instructions} = instruction
-			let intStackHeight = context.getStackHeight(false),
-			    floatStackHeight = context.getStackHeight(true)
+			const {stackState} = context
 			const blockLabel = context.makeLabel(type.toUpperCase())
 			const loop = type === 'loop'
 			if (loop) output.push(new asm.Label(blockLabel))
-			context.pushLabel(blockLabel, returns)
+			context.pushLabel(loop, blockLabel, returns)
 			const branch = compileInstructions(instructions, context, output)
 			context.popLabel()
 			if (!loop) output.push(new asm.Label(blockLabel))
@@ -690,13 +724,11 @@ function compileInstruction(
 				}
 			}
 
-			for (const label of branch.branches) branches.add(label)
-			branches.delete(blockLabel)
-			if (returns !== 'empty') {
-				if (isFloat(returns)) floatStackHeight++
-				else intStackHeight++
+			for (const label of branch.branches) {
+				if (label !== blockLabel) branches.add(label)
 			}
-			context.setStackHeights(intStackHeight, floatStackHeight)
+			context.restoreStackState(stackState)
+			if (returns !== 'empty') context.push(isFloat(returns))
 			break
 		}
 		case 'if': {
@@ -710,17 +742,16 @@ function compileInstruction(
 				[cond] = INT_INTERMEDIATE_REGISTERS
 				output.push(new asm.PopInstruction(cond))
 			}
-			let intStackHeight = context.getStackHeight(false),
-			    floatStackHeight = context.getStackHeight(true)
+			const {stackState} = context
 			const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 			output.push(
 				new asm.TestInstruction(datum, datum),
 				new asm.JumpInstruction(hasElse ? elseLabel! : endLabel, 'e')
 			)
-			context.pushLabel(endLabel, returns)
+			context.pushLabel(false, endLabel, returns)
 			const branch = compileInstructions(ifInstructions, context, output)
 			if (hasElse) {
-				context.setStackHeights(intStackHeight, floatStackHeight)
+				context.restoreStackState(stackState)
 				if (!branch.definitely) output.push(new asm.JumpInstruction(endLabel))
 				output.push(new asm.Label(elseLabel!))
 				const {branches, definitely} =
@@ -733,55 +764,40 @@ function compileInstruction(
 			output.push(new asm.Label(endLabel))
 			if (branch.definitely && !branch.branches.has(endLabel)) return branch
 
-			for (const label of branch.branches) branches.add(label)
-			branches.delete(endLabel)
-			if (returns !== 'empty') {
-				if (isFloat(returns)) floatStackHeight++
-				else intStackHeight++
+			for (const label of branch.branches) {
+				if (label !== endLabel) branches.add(label)
 			}
-			unwindStack(intStackHeight, floatStackHeight, context, output)
+			context.restoreStackState(stackState)
+			if (returns !== 'empty') context.push(isFloat(returns))
 			break
 		}
 		case 'br':
-		case 'br_if': {
-			let endLabel: string | undefined
-			if (instruction.type === 'br_if') {
-				endLabel = context.makeLabel('BR_IF_END')
-				let cond = context.resolvePop()
-				if (!cond) {
-					[cond] = INT_INTERMEDIATE_REGISTERS
-					output.push(new asm.PopInstruction(cond))
-				}
-				const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
-				output.push(
-					new asm.TestInstruction(datum, datum),
-					new asm.JumpInstruction(endLabel, 'e')
-				)
-			}
-			branches.add(compileBranch(instruction.label, context, output))
-			if (!endLabel) return {branches, definitely: true}
-
-			output.push(new asm.Label(endLabel))
-			break
-		}
 		case 'br_table': {
-			let value = context.resolvePop()
-			if (!value) {
-				[value] = INT_INTERMEDIATE_REGISTERS
-				output.push(new asm.PopInstruction(value))
+			let cases: number[], defaultCase: number
+			let datum: asm.Datum
+			if (instruction.type === 'br_table') {
+				({cases, defaultCase} = instruction)
+				let register = context.resolvePop()
+				if (!register) {
+					[register] = INT_INTERMEDIATE_REGISTERS
+					output.push(new asm.PopInstruction(register))
+				}
+				datum = {type: 'register', register, width: 'l'}
 			}
-			const datum: asm.Datum = {type: 'register', register: value, width: 'l'}
-			const intStackHeight = context.getStackHeight(false),
-			      floatStackHeight = context.getStackHeight(true)
-			const {cases, defaultCase} = instruction
+			else {
+				cases = []
+				defaultCase = instruction.label
+			}
+			const {stackState} = context
 			const numCases = cases.length
 			// Perform a binary search over possible cases
 			// TODO: can this be done with a jump table instead?
 			function compileRangeBranches(min: number, max: number) {
 				if (min + 1 === max) {
-					context.setStackHeights(intStackHeight, floatStackHeight)
 					const nesting = min === numCases ? defaultCase : cases[min]
-					branches.add(compileBranch(nesting, context, output))
+					const branch = compileBranch(nesting, context, output)
+					if (branch) branches.add(branch)
+					context.restoreStackState(stackState)
 					return
 				}
 
@@ -795,8 +811,27 @@ function compileInstruction(
 				output.push(new asm.Label(aboveLabel))
 				compileRangeBranches(mid, max)
 			}
-			compileRangeBranches(0, cases.length + 1)
+			compileRangeBranches(0, numCases + 1)
 			return {branches, definitely: true}
+		}
+		case 'br_if': {
+			const endLabel = context.makeLabel('BR_IF_END')
+			let cond = context.resolvePop()
+			if (!cond) {
+				[cond] = INT_INTERMEDIATE_REGISTERS
+				output.push(new asm.PopInstruction(cond))
+			}
+			const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
+			output.push(
+				new asm.TestInstruction(datum, datum),
+				new asm.JumpInstruction(endLabel, 'e')
+			)
+			const {stackState} = context
+			const branch = compileBranch(instruction.label, context, output)
+			if (branch) branches.add(branch)
+			context.restoreStackState(stackState)
+			output.push(new asm.Label(endLabel))
+			break
 		}
 		case 'call':
 		case 'call_indirect': {
@@ -898,10 +933,7 @@ function compileInstruction(
 			break
 		}
 		case 'return':
-			popResultAndUnwind(context, output)
-			output.push(new asm.JumpInstruction(
-				context.moduleContext.returnLabel(context.functionIndex)
-			))
+			compileReturn(context, output)
 			return {branches, definitely: true}
 		case 'drop':
 			if (!context.resolvePop()) {
