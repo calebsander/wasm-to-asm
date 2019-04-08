@@ -11,8 +11,12 @@ const TESTS = [
 	'address',
 	'block',
 	'br',
-	// 'br_if', this test requires infering that the branch is always taken in (i32.const 1) (br_if 0)
+	'br_if',
 	'br_table',
+	'break-drop',
+	'call',
+	'call_indirect',
+	// 'conversions', requires support for nan:0x123abc expressions
 	'endianness',
 	'f32',
 	'f32_bitwise',
@@ -123,7 +127,7 @@ function getValue(expression: SExpression) {
 			else if (op[0] === 'f') {
 				try {
 					BigInt(value)
-					value += '.'
+					value += (value.startsWith('0x') ? 'p' : 'e') + '0'
 				}
 				catch {}
 				if (op === 'f32.const') value += 'F'

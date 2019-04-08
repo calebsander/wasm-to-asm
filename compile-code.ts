@@ -1203,7 +1203,7 @@ function compileInstruction(
 			const sizeLabel: asm.Datum = {type: 'label', label: moduleContext.memorySizeLabel}
 			const failLabel = context.makeLabel('MMAP_FAIL'),
 			      skipLabel = context.makeLabel('MMAP_SKIP'),
-			      endLabel = context.makeLabel('MMAP_SKIP_END')
+			      endLabel = context.makeLabel('MMAP_END')
 			output.push(
 				new asm.TestInstruction(pagesDatum, pagesDatum),
 				new asm.JumpInstruction(skipLabel, 'e'), // mmap() of 0 pages isn't allowed
