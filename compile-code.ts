@@ -772,66 +772,82 @@ function compileInstruction(
 			break
 		}
 		case 'br':
-		case 'br_table': {
-			let cases: number[], defaultCase: number
-			let datum: asm.Datum
-			if (instruction.type === 'br_table') {
-				({cases, defaultCase} = instruction)
-				let register = context.resolvePop()
-				if (!register) {
-					[register] = INT_INTERMEDIATE_REGISTERS
-					output.push(new asm.PopInstruction(register))
-				}
-				datum = {type: 'register', register, width: 'l'}
-			}
-			else {
-				cases = []
-				defaultCase = instruction.label
-			}
-			const {stackState} = context
-			const numCases = cases.length
-			// Perform a binary search over possible cases
-			// TODO: can this be done with a jump table instead?
-			function compileRangeBranches(min: number, max: number) {
-				if (min + 1 === max) {
-					const nesting = min === numCases ? defaultCase : cases[min]
-					const branch = compileBranch(nesting, context, output)
-					if (branch) branches.add(branch)
-					context.restoreStackState(stackState)
-					return
-				}
-
-				const mid = max > numCases ? numCases : (min + max) >> 1
-				const aboveLabel = context.makeLabel('BR_TABLE_ABOVE')
-				output.push(
-					new asm.CmpInstruction({type: 'immediate', value: mid}, datum),
-					new asm.JumpInstruction(aboveLabel, 'ae')
-				)
-				compileRangeBranches(min, mid)
-				output.push(new asm.Label(aboveLabel))
-				compileRangeBranches(mid, max)
-			}
-			compileRangeBranches(0, numCases + 1)
-			return {branches, definitely: true}
-		}
 		case 'br_if': {
-			const endLabel = context.makeLabel('BR_IF_END')
-			let cond = context.resolvePop()
-			if (!cond) {
-				[cond] = INT_INTERMEDIATE_REGISTERS
-				output.push(new asm.PopInstruction(cond))
+			const {type, label} = instruction
+			let endLabel: string | undefined
+			let stackState: StackState
+			if (type === 'br_if') {
+				endLabel = context.makeLabel('BR_IF_END')
+				let cond = context.resolvePop()
+				if (!cond) {
+					[cond] = INT_INTERMEDIATE_REGISTERS
+					output.push(new asm.PopInstruction(cond))
+				}
+				({stackState} = context)
+				const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
+				output.push(
+					new asm.TestInstruction(datum, datum),
+					new asm.JumpInstruction(endLabel, 'e')
+				)
 			}
-			const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
-			output.push(
-				new asm.TestInstruction(datum, datum),
-				new asm.JumpInstruction(endLabel, 'e')
-			)
-			const {stackState} = context
-			const branch = compileBranch(instruction.label, context, output)
+			const branch = compileBranch(label, context, output)
 			if (branch) branches.add(branch)
-			context.restoreStackState(stackState)
+			if (!endLabel) return {branches, definitely: true}
+
+			context.restoreStackState(stackState!)
 			output.push(new asm.Label(endLabel))
 			break
+		}
+		case 'br_table': {
+			const {cases, defaultCase} = instruction
+			const numCases = cases.length
+			let value = context.resolvePop()
+			if (!value) {
+				value = INT_INTERMEDIATE_REGISTERS[0]
+				output.push(new asm.PopInstruction(value))
+			}
+			const valueDatum: asm.Datum = {type: 'register', register: value}
+			const tableLabel = context.makeLabel('BR_TABLE'),
+			      defaultLabel = context.makeLabel('BR_TABLE_DEFAULT')
+			const tableAddress = INT_INTERMEDIATE_REGISTERS[1]
+			const addressDatum: asm.Datum = {type: 'register', register: tableAddress}
+			output.push(
+				new asm.CmpInstruction(
+					{type: 'immediate', value: numCases}, {...valueDatum, width: 'l'}
+				),
+				new asm.JumpInstruction(defaultLabel, 'ae'),
+				new asm.LeaInstruction({type: 'label', label: tableLabel}, addressDatum),
+				new asm.MoveExtendInstruction(
+					{type: 'indirect', register: tableAddress, offset: {register: value, scale: 4}},
+					valueDatum,
+					true, {src: 'l', dest: 'q'}
+				),
+				new asm.AddInstruction(valueDatum, addressDatum),
+				new asm.JumpInstruction(addressDatum),
+				new asm.Directive({type: 'section', args: ['.rodata']}),
+				new asm.Directive({type: 'balign', args: [4]}),
+				new asm.Label(tableLabel)
+			)
+			const {stackState} = context
+			const caseInstructions: asm.AssemblyInstruction[] = []
+			cases.forEach((nesting, i) => {
+				const caseLabel = `${tableLabel}_${i}`
+				output.push(new asm.Directive(
+					{type: 'long', args: [caseLabel + ' - ' + tableLabel]}
+				))
+				caseInstructions.push(new asm.Label(caseLabel))
+				const branch = compileBranch(nesting, context, caseInstructions)
+				if (branch) branches.add(branch)
+				context.restoreStackState(stackState)
+			})
+			output.push(
+				new asm.Directive({type: 'text'}),
+				...caseInstructions,
+				new asm.Label(defaultLabel)
+			)
+			const branch = compileBranch(defaultCase, context, output)
+			if (branch) branches.add(branch)
+			return {branches, definitely: true}
 		}
 		case 'call':
 		case 'call_indirect': {

@@ -31,8 +31,9 @@ export type JumpCond
 export type GASDirective
 	= {type: 'text' | 'data', args?: void}
 	| {type: 'globl', args: [string]}
-	| {type: 'long' | 'quad', args: [number]}
+	| {type: 'long' | 'quad', args: [number | string]}
 	| {type: 'balign', args: [number]}
+	| {type: 'section', args: ['.rodata']}
 
 const isSIMDRegister = (register: Register) => register.startsWith('xmm')
 
@@ -108,6 +109,17 @@ abstract class FullRegisterInstruction {
 		return datumToString({type: 'register', register: this.register})
 	}
 }
+abstract class JumpLikeInstruction {
+	constructor(readonly target: string | Datum) {}
+	abstract readonly op: string
+	get str() {
+		const {target} = this
+		const targetString = typeof target === 'string'
+			? target
+			: '*' + datumToString(target)
+		return this.op + ' ' + targetString
+	}
+}
 export class Directive {
 	constructor(readonly directive: GASDirective) {}
 	get str() {
@@ -136,15 +148,8 @@ export class AndNotPackedInstruction extends SrcDestInstruction {
 	get op() { return 'andn' }
 	get packed() { return true }
 }
-export class CallInstruction {
-	constructor(readonly target: string | Datum) {}
-	get str() {
-		const {target} = this
-		const targetString = typeof target === 'string'
-			? target
-			: '*' + datumToString(target)
-		return 'call ' + targetString
-	}
+export class CallInstruction extends JumpLikeInstruction {
+	get op() { return 'call' }
 }
 export class CdqInstruction {
 	get str() { return 'cdq' }
@@ -197,9 +202,11 @@ export class DivBinaryInstruction extends SrcDestInstruction {
 export class ImulInstruction extends SrcDestInstruction {
 	get op() { return 'imul' }
 }
-export class JumpInstruction {
-	constructor(readonly target: string, readonly cond?: JumpCond) {}
-	get str() { return `j${this.cond || 'mp'} ${this.target}` }
+export class JumpInstruction extends JumpLikeInstruction {
+	constructor(target: string | Datum, readonly cond?: JumpCond) {
+		super(target)
+	}
+	get op() { return `j${this.cond || 'mp'}` }
 }
 export class LeaInstruction extends SrcDestInstruction {
 	get op() { return 'lea' }
