@@ -129,9 +129,7 @@ Pretty nifty!
 
 There are several features that aren't supported yet:
 - Linking multiple WebAssembly modules to each other
-- `start` functions in modules
 - Functions taking more than 12 int params or 13 float params
-- Stopping compilation at `unreachable` and `br` instructions
 
 ## Calling convention
 

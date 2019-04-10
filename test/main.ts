@@ -26,23 +26,38 @@ const TESTS = [
 	'f64_cmp',
 	'fac',
 	'float_exprs',
+	// 'float_memory', requires support for nan:0x123abc expressions
 	'float_misc',
 	'forward',
+	'func',
+	'globals',
 	'i32',
 	'i64',
+	'if',
 	'int_exprs',
+	'int_literals',
+	'labels',
 	'left-to-right',
+	'load',
 	'local_get',
 	'local_set',
 	'local_tee',
+	'loop',
 	'memory',
 	'memory_grow',
 	'memory_redundancy',
 	'memory_size',
-	'stack'
+	'memory_trap',
+	'nop',
+	'return',
+	'select',
+	'stack',
+	'store',
+	'switch',
+	'unwind'
 ]
 const FUNC_NAME = /^"(.+)"$/
-const TESTS_START = /\n\((?:assert_return|invoke)/
+const TESTS_START = /\n\((?:assert_return|assert_trap|invoke)/
 
 const exec = promisify(childProcess.exec),
       execFile = promisify(childProcess.execFile),

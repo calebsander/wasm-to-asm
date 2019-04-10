@@ -1966,6 +1966,7 @@ export function compileModule(
 	const globalInstructions: asm.AssemblyInstruction[] =
 		[new asm.Directive({type: 'data'})]
 	const tableInitInstructions: asm.AssemblyInstruction[] = []
+	let startFunc: number | undefined
 	for (const section of module) {
 		switch (section.type) {
 			case 'type':
@@ -2014,6 +2015,9 @@ export function compileModule(
 				break
 			case 'export':
 				moduleContext.addExports(section.exports)
+				break
+			case 'start':
+				startFunc = section.functionIndex
 				break
 			case 'element':
 				for (const {tableIndex, offset, functionIndices} of section.initializers) {
@@ -2074,6 +2078,12 @@ export function compileModule(
 				}
 		}
 	}
+	if (!(functionsTypes && functionsLocals && codeSection)) {
+		throw new Error('Expected function and code sections')
+	}
+	for (let i = 0; i < functionsTypes.length; i++) {
+		moduleContext.setFunctionStats(i, getFunctionStats(functionsTypes[i], functionsLocals[i]))
+	}
 	const declarations: HeaderDeclaration[] = []
 	const {exportFunctions, exportGlobals, exportMemory, globalTypes} = moduleContext
 	globalInstructions.push(new asm.Directive({type: 'balign', args: [4]}))
@@ -2124,9 +2134,9 @@ export function compileModule(
 			directives.data
 		)
 	}
-	let initAssembly: asm.AssemblyInstruction[]
-	if (initInstructions.length || tableInitInstructions.length) { // not an empty function
-		initAssembly = []
+	const initAssembly: asm.AssemblyInstruction[] = []
+	// Add initialization instructions if there is initialization to be done
+	if (initInstructions.length || tableInitInstructions.length || startFunc !== undefined) {
 		declarations.push(new FunctionDeclaration(
 			'void',
 			addSysvLabel(moduleName, 'init_module', initAssembly),
@@ -2137,17 +2147,15 @@ export function compileModule(
 		}
 		compileInstructions(initInstructions, globalContext, initAssembly)
 		initAssembly.push(...tableInitInstructions)
+		if (startFunc !== undefined) {
+			compileInstruction(
+				{type: 'call', func: startFunc}, globalContext, initAssembly
+			)
+		}
 		for (const register of reverse(SYSV_CALLEE_SAVE_REGISTERS)) {
 			initAssembly.push(new asm.PopInstruction(register))
 		}
 		initAssembly.push(new asm.RetInstruction)
-	}
-	else initAssembly = []
-	if (!(functionsTypes && functionsLocals && codeSection)) {
-		throw new Error('Expected function and code sections')
-	}
-	for (let i = 0; i < functionsTypes.length; i++) {
-		moduleContext.setFunctionStats(i, getFunctionStats(functionsTypes[i], functionsLocals[i]))
 	}
 	const assemblySections = [
 		globalInstructions,
