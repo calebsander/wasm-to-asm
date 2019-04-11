@@ -1547,7 +1547,7 @@ function compileInstruction(
 			}
 			output.push(
 				signed
-					? i32 ? new asm.CdqInstruction : new asm.CqoInstruction
+					? i32 ? new asm.CdqoInstruction : new asm.CqtoInstruction
 					: new asm.XorInstruction(DIV_UPPER_DATUM, DIV_UPPER_DATUM),
 				new asm.DivInstruction(datum2, signed, width)
 			)

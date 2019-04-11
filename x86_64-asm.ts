@@ -151,11 +151,11 @@ export class AndNotPackedInstruction extends SrcDestInstruction {
 export class CallInstruction extends JumpLikeInstruction {
 	get op() { return 'call' }
 }
-export class CdqInstruction {
+export class CdqoInstruction {
 	get str() { return 'cdq' }
 }
-export class CqoInstruction {
-	get str() { return 'cqo' }
+export class CqtoInstruction {
+	get str() { return 'cqto' }
 }
 export class CMoveInstruction extends SrcDestInstruction {
 	constructor(src: Datum, dest: Datum, readonly cond: JumpCond) {
