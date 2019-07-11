@@ -1785,19 +1785,21 @@ function compileInstruction(
 			break
 		}
 		case 'i64.extend_s': {
-			let value = context.resolvePop()
-			const onStack = !value
-			if (onStack) {
-				[value] = INT_INTERMEDIATE_REGISTERS
-				output.push(new asm.PopInstruction(value))
+			const value = context.resolvePop()
+			let datum: asm.Datum, result: asm.Datum
+			if (value) {
+				result = {type: 'register', register: value}
+				datum = {...result, width: 'l'}
+			}
+			else {
+				datum = STACK_TOP
+				result = {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
 			}
 			output.push(new asm.MoveExtendInstruction(
-				{type: 'register', register: value!, width: 'l'},
-				{type: 'register', register: value!, width: 'q'},
-				true
+				datum, result, true, {src: 'l', dest: 'q'}
 			))
 			context.push(false)
-			if (onStack) output.push(new asm.PushInstruction(value!))
+			if (!value) output.push(new asm.MoveInstruction(result, datum))
 			break
 		}
 		case 'f32.convert_s/i32':
