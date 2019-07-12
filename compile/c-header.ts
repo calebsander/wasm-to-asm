@@ -1,4 +1,4 @@
-import {ResultType} from './parse-instruction'
+import {ResultType} from '../parse/instruction'
 
 type CType = 'void' | 'int' | 'long' | 'float' | 'double'
 

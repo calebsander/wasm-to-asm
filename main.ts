@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import {promisify} from 'util'
 import {linkModules, NamedModules} from './link-modules'
-import {parseModule} from './parse-module'
+import {parseModule} from './parse/module'
 
 const WASM_EXTENSION = '.wasm',
       ASM_EXTENSION = '.s',

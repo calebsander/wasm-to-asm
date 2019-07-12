@@ -12,10 +12,10 @@ import {
 	parseUntil,
 	parseVector,
 	parseWhile
-} from './parse'
-import {ValueType, parseValueType} from './parse-value-type'
+} from '.'
+import {ValueType, parseValueType} from './value-type'
 
-export type ResultType = 'empty' | ValueType
+export type ResultType = ValueType | 'empty'
 type Label = number
 type FunctionIndex = number
 type TypeIndex = number
@@ -25,55 +25,85 @@ interface MemoryAccess {
 	align: number
 	offset: number
 }
+export interface BlockInstruction {
+	type: 'block' | 'loop'
+	returns: ResultType
+	instructions: Instruction[]
+}
+export interface IfInstruction {
+	type: 'if'
+	returns: ResultType
+	ifInstructions: Instruction[]
+	elseInstructions: Instruction[]
+}
+export interface BranchInstruction {
+	type: 'br' | 'br_if'
+	label: Label
+}
+export interface BranchTableInstruction {
+	type: 'br_table'
+	cases: Label[]
+	defaultCase: Label
+}
+export interface CallInstruction {
+	type: 'call'
+	func: FunctionIndex
+}
+export interface CallIndirectInstruction {
+	type: 'call_indirect'
+	funcType: TypeIndex
+}
 type ControlInstruction
 	= {type: 'unreachable' | 'nop' | 'return'}
-	| {type: 'block' | 'loop', returns: ResultType, instructions: Instruction[]}
-	| {
-			type: 'if',
-			returns: ResultType,
-			ifInstructions: Instruction[],
-			elseInstructions: Instruction[]
-		}
-	| {type: 'br' | 'br_if', label: Label}
-	| {type: 'br_table', cases: Label[], defaultCase: Label}
-	| {type: 'call', func: FunctionIndex}
-	| {type: 'call_indirect', funcType: TypeIndex}
+	| BlockInstruction
+	| IfInstruction
+	| BranchInstruction
+	| BranchTableInstruction
+	| CallInstruction
+	| CallIndirectInstruction
 type ParametricInstruction = {type: 'drop' | 'select'}
+export interface LocalInstruction {
+	type: 'get_local' | 'set_local' | 'tee_local'
+	local: LocalIndex
+}
 type VariableInstruction
-	= {type: 'get_local' | 'set_local' | 'tee_local', local: LocalIndex}
+	= LocalInstruction
 	| {type: 'get_global' | 'set_global', global: GlobalIndex}
+export interface LoadStoreInstruction {
+	type:
+		'i32.load' |
+		'i64.load' |
+		'f32.load' |
+		'f64.load' |
+		'i32.load8_s' |
+		'i32.load8_u' |
+		'i32.load16_s' |
+		'i32.load16_u' |
+		'i64.load8_s' |
+		'i64.load8_u' |
+		'i64.load16_s' |
+		'i64.load16_u' |
+		'i64.load32_s' |
+		'i64.load32_u' |
+		'i32.store' |
+		'i64.store' |
+		'f32.store' |
+		'f64.store' |
+		'i32.store8' |
+		'i32.store16' |
+		'i64.store8' |
+		'i64.store16' |
+		'i64.store32'
+	access: MemoryAccess
+}
 type MemoryInstruction
-	=	{
-			type:
-				'i32.load' |
-				'i64.load' |
-				'f32.load' |
-				'f64.load' |
-				'i32.load8_s' |
-				'i32.load8_u' |
-				'i32.load16_s' |
-				'i32.load16_u' |
-				'i64.load8_s' |
-				'i64.load8_u' |
-				'i64.load16_s' |
-				'i64.load16_u' |
-				'i64.load32_s' |
-				'i64.load32_u' |
-				'i32.store' |
-				'i64.store' |
-				'f32.store' |
-				'f64.store' |
-				'i32.store8' |
-				'i32.store16' |
-				'i64.store8' |
-				'i64.store16' |
-				'i64.store32',
-			access: MemoryAccess
-		}
+	= LoadStoreInstruction
 	| {type: 'memory.size' | 'memory.grow'}
-type NumericInstruction
+export type ConstInstruction
 	= {type: 'i32.const' | 'f32.const' | 'f64.const', value: number}
 	| {type: 'i64.const', value: bigint}
+type NumericInstruction
+	= ConstInstruction
 	| {type:
 			'i32.eqz' |
 			'i32.eq' |

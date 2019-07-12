@@ -1,3 +1,6 @@
+import {STACK_TOP} from './conventions'
+import {growStack, shrinkStack} from './helpers'
+
 export type Register
 	= 'rax' | 'rbx' | 'rcx' | 'rdx'
 	| 'rsp' | 'rbp'
@@ -66,17 +69,16 @@ function datumToString(datum: Datum): string {
 		}
 		case 'indirect': {
 			const {register, immediate, offset} = datum
-			let result = ''
-			if (immediate) result += `${immediate}`
+			let result = `${immediate || ''}`
 			result += '(%' + register
 			if (offset) {
-				result += ', %' + offset.register
-				const {scale} = offset
+				const {register, scale} = offset
+				result += ', %' + register
 				if (scale) result += `, ${scale}`
 			}
 			return result + ')'
 		}
-		case 'label': return `${datum.label}(%rip)`
+		case 'label': return datum.label + '(%rip)'
 		case 'immediate': return `$${datum.value}`
 	}
 }
@@ -253,13 +255,8 @@ export class PopInstruction extends FullRegisterInstruction {
 	get str() {
 		if (isSIMDRegister(this.register)) {
 			return new MoveInstruction(
-				{type: 'indirect', register: 'rsp'},
-				{type: 'register', register: this.register},
-				'd'
-			).str + '\n' + new AddInstruction(
-				{type: 'immediate', value: 8},
-				{type: 'register', register: 'rsp'}
-			).str
+				STACK_TOP, {type: 'register', register: this.register}, 'd'
+			).str + '\n' + shrinkStack(1).str
 		}
 		else return 'pop ' + this.registerStr
 	}
@@ -271,14 +268,8 @@ export class PopcntInstruction extends SrcDestInstruction {
 export class PushInstruction extends FullRegisterInstruction {
 	get str() {
 		if (isSIMDRegister(this.register)) {
-			return new SubInstruction(
-				{type: 'immediate', value: 8},
-				{type: 'register', register: 'rsp'}
-			).str + '\n' +
-			new MoveInstruction(
-				{type: 'register', register: this.register},
-				{type: 'indirect', register: 'rsp'},
-				'd'
+			return growStack(1).str + '\n' + new MoveInstruction(
+				{type: 'register', register: this.register}, STACK_TOP, 'd'
 			).str
 		}
 		else return 'push ' + this.registerStr
@@ -294,11 +285,11 @@ export class RorInstruction extends SrcDestInstruction {
 	get op() { return 'ror' }
 }
 export class RoundInstruction extends SrcDestInstruction {
-	constructor(mode: number, src: Datum, readonly dest: Datum, width: Width) {
+	constructor(mode: number, src: Datum, readonly target: Datum, width: Width) {
 		super({type: 'immediate', value: mode}, src, width)
 	}
 	get op() { return 'round' }
-	get str() { return `${super.str}, ${datumToString(this.dest)}` }
+	get str() { return `${super.str}, ${datumToString(this.target)}` }
 }
 export class SarInstruction extends SrcDestInstruction {
 	get op() { return 'sar' }
@@ -333,9 +324,4 @@ export class XorInstruction extends SrcDestInstruction {
 }
 export class XorPackedInstruction extends XorInstruction {
 	get packed() { return true }
-}
-
-export const SYSCALL = {
-	exit: 60,
-	mmap: 9
 }

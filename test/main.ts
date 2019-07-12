@@ -1,7 +1,7 @@
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import {promisify} from 'util'
-import {INVALID_EXPORT_CHAR} from '../compile-code'
+import {INVALID_EXPORT_CHAR} from '../compile/conventions'
 import {parse, SExpression} from './parse-s'
 
 const CC = 'gcc', C_STD = '-std=c11'

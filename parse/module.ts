@@ -11,9 +11,9 @@ import {
 	parseUnsigned,
 	parseUntil,
 	parseVector
-} from './parse'
-import {Instruction, parseBody} from './parse-instruction'
-import {ValueType, parseValueType} from './parse-value-type'
+} from '.'
+import {Instruction, parseBody} from './instruction'
+import {ValueType, parseValueType} from './value-type'
 
 const VERSION = 1
 
@@ -50,7 +50,7 @@ export interface Export {
 	name: string
 	description: ExportDescription
 }
-interface TableInitializer {
+export interface TableInitializer {
 	tableIndex: number
 	offset: Instruction[]
 	functionIndices: number[]
@@ -59,7 +59,7 @@ interface CodeSegment {
 	locals: ValueType[]
 	instructions: Instruction[]
 }
-interface MemoryInitializer {
+export interface MemoryInitializer {
 	memoryIndex: number
 	offset: Instruction[]
 	data: ArrayBuffer
@@ -105,7 +105,7 @@ interface ElementSection {
 	type: 'element'
 	initializers: TableInitializer[]
 }
-export interface CodeSection {
+interface CodeSection {
 	type: 'code'
 	segments: CodeSegment[]
 }

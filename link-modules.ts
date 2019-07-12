@@ -1,5 +1,6 @@
-import {Section} from './parse-module'
-import {compileModule, ModuleIndices} from './compile-code'
+import {Section} from './parse/module'
+import {ModuleIndices} from './compile/context'
+import {compileModule} from './compile/module'
 
 export interface NamedModules {
 	[name: string]: Section[]
@@ -11,23 +12,26 @@ interface CompiledModuleString {
 interface CompiledModules {
 	[name: string]: CompiledModuleString
 }
+interface Stringable {
+	readonly str: string
+}
 
-const makeString = (elements: {str: string}[]): string =>
-	elements.map(instruction => instruction.str + '\n').join('')
+const makeString = (elements: Stringable[]): string =>
+	elements.map(({str}) => str + '\n').join('')
 
-export function linkModules(modules: NamedModules) {
+export function linkModules(modules: NamedModules): CompiledModules {
 	const moduleIndices: ModuleIndices = {}
 	let moduleIndex = 0
-	for (const module in modules) moduleIndices[module] = moduleIndex
+	for (const moduleName in modules) moduleIndices[moduleName] = moduleIndex
 	const compiledModules: CompiledModules = {}
-	for (const module in modules) {
+	for (const moduleName in modules) {
 		const {instructions, declarations} = compileModule({
-			module: modules[module],
-			index: moduleIndices[module],
+			module: modules[moduleName],
+			index: moduleIndices[moduleName],
 			moduleIndices,
-			moduleName: module
+			moduleName: moduleName
 		})
-		compiledModules[module] = {
+		compiledModules[moduleName] = {
 			assembly: makeString(instructions),
 			header: makeString(declarations)
 		}
