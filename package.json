@@ -12,7 +12,7 @@
 	"author": "Caleb Sander",
 	"license": "MIT",
 	"devDependencies": {
-		"@types/node": "^10.9.4",
-		"typescript": "^3.4.1"
+		"@types/node": "^12.6.2",
+		"typescript": "^3.5.3"
 	}
 }
