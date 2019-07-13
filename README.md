@@ -1,5 +1,7 @@
 # wasm-to-asm
 
+[![Build Status](https://travis-ci.org/calebsander/wasm-to-asm.svg?branch=master)](https://travis-ci.org/calebsander/wasm-to-asm)
+
 This project compiles [WebAssembly](https://webassembly.org) modules to x86_64 assembly code.
 This allows WebAssembly code to be linked with C, C++, assembly, Rust or any other language that supports the [SysV ABI calling convention](https://wiki.osdev.org/System_V_ABI#x86-64).
 
@@ -125,6 +127,12 @@ $ ./fib
 ```
 Pretty nifty!
 
+## Compatibility
+
+The assembly code produced should be compatible with any AT&T-syntax assembler for x86_64, such as [gas](https://en.wikipedia.org/wiki/GNU_Assembler).
+Currently, `unreachable` and the linear growable memory are implemented with Linux system calls, so WebAssembly code using these features will only work on Linux.
+To call WebAssembly functions from C or similar languages, the compiler must use the SysV ABI calling convention.
+
 ## TODO
 
 There are several features that aren't supported yet:
@@ -132,6 +140,7 @@ There are several features that aren't supported yet:
 - Functions taking more than 12 int params or 13 float params
 - Runtime traps (out-of-bounds memory access, division by 0, etc.)
 - Optimizations for multiple-instruction sequences (e.g. incrementing a local)
+- Support for `mmap()` syscalls on Mac OS
 
 ## Calling convention
 
