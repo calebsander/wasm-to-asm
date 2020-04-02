@@ -4,7 +4,8 @@ import {promisify} from 'util'
 import {INVALID_EXPORT_CHAR} from '../compile/conventions'
 import {parse, SExpression} from './parse-s'
 
-const CC = 'gcc', C_STD = '-std=c11'
+const CC = 'clang'
+const OPENSSL_CFLAGS = ['-I/usr/local/opt/openssl/include', '-L/usr/local/opt/openssl/lib']
 const C_NAN = 'NAN'
 const SUCCESS = 'success'
 const TESTS = [
@@ -70,7 +71,7 @@ async function compileTest(test: string, ...ccArgs: string[]) {
 	await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
 	await execFile('node', [__dirname + '/../main.js', wasmFile])
 	const runPath = baseFile + '-test'
-	await execFile(CC, [C_STD, baseFile + '.s', runPath + '.c', '-o', runPath, ...ccArgs])
+	await execFile(CC, [baseFile + '.s', runPath + '.c', '-o', runPath, ...ccArgs])
 	return {baseFile, runPath}
 }
 function checkSuccessOutput({stdout}: {stdout: string}) {
@@ -92,7 +93,7 @@ async function fibTest() {
 async function sha256Test() {
 	const test = 'sha256'
 	try {
-		const {runPath} = await compileTest(test, '-lcrypto')
+		const {runPath} = await compileTest(test, ...OPENSSL_CFLAGS, '-lcrypto')
 		checkSuccessOutput(await execFile(runPath))
 	}
 	catch (e) {
@@ -251,7 +252,7 @@ function getValue(expression: SExpression) {
 			      runPath = cFilePath.replace('.c', '')
 			await writeFile(cFilePath, cFile)
 			try {
-				await execFile(CC, [C_STD, sFilePath, cFilePath, '-o', runPath])
+				await execFile(CC, [sFilePath, cFilePath, '-o', runPath])
 				checkSuccessOutput(await execFile(runPath))
 			}
 			catch (e) {
