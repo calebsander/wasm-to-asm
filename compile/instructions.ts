@@ -31,6 +31,7 @@ import {
 	compileIntArithmeticInstruction,
 	compileIntDivInstruction,
 	compileIntMulInstruction,
+	compileMinMaxInstruction,
 	compileReinterpretInstruction,
 	compileSignInstruction,
 	compileTruncateInstruction,
@@ -42,12 +43,12 @@ import {
 	compileSetGlobalInstruction,
 	compileStoreLocalInstruction
 } from './variable'
-import {AssemblyInstruction} from './x86_64-asm'
+import * as asm from './x86_64-asm'
 
 function compileInstruction(
 	instruction: Instruction,
 	context: CompilationContext,
-	output: AssemblyInstruction[]
+	output: asm.AssemblyInstruction[]
 ): BranchResult {
 	// Uncomment these lines to show the wasm instruction
 	// corresponding to each assembly instruction
@@ -240,15 +241,17 @@ function compileInstruction(
 		case 'f32.sub':
 		case 'f32.mul':
 		case 'f32.div':
-		case 'f32.min':
-		case 'f32.max':
 		case 'f64.add':
 		case 'f64.sub':
 		case 'f64.mul':
 		case 'f64.div':
+			compileFloatBinaryInstruction(instruction.type, context, output)
+			break
+		case 'f32.min':
+		case 'f32.max':
 		case 'f64.min':
 		case 'f64.max':
-			compileFloatBinaryInstruction(instruction.type, context, output)
+			compileMinMaxInstruction(instruction.type, context, output)
 			break
 		case 'i32.wrap':
 			compileWrapInstruction(context, output)
@@ -295,7 +298,7 @@ function compileInstruction(
 export function compileInstructions(
 	instructions: Instruction[],
 	context: CompilationContext,
-	output: AssemblyInstruction[]
+	output: asm.AssemblyInstruction[]
 ): BranchResult {
 	const allBranches = new Set<string>()
 	for (const instruction of instructions) {

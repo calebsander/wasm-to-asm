@@ -4,16 +4,17 @@ import {ValueType} from '../parse/value-type'
 import {reverse} from '../util'
 import {compileInstructions} from './instructions'
 import {FunctionDeclaration, getCType, GlobalDeclaration, HeaderDeclaration} from './c-header'
-import {CompilationContext, getFunctionStats, ModuleContext, ModuleIndices} from './context'
+import {CompilationContext, getFunctionStats, ModuleContext, ModuleIndices, SPRelative} from './context'
 import {
 	INT_INTERMEDIATE_REGISTERS,
 	INVALID_EXPORT_CHAR,
 	SYSV_CALLEE_SAVE_REGISTERS,
 	SYSV_CALLEE_SAVE_SET,
 	SYSV_FLOAT_PARAM_REGISTERS,
-	SYSV_INT_PARAM_REGISTERS
+	SYSV_INT_PARAM_REGISTERS,
+	isLinux
 } from './conventions'
-import {growStack, popResultAndUnwind, relocateArguments, shrinkStack} from './helpers'
+import {growStack, ParamTarget, popResultAndUnwind, relocateArguments, shrinkStack} from './helpers'
 import * as asm from './x86_64-asm'
 
 interface GlobalDirective {
@@ -139,7 +140,8 @@ export function parseSections({module, index, moduleIndices, moduleName}: Module
 	}
 }
 
-function addExportLabel(label: string, output: asm.AssemblyInstruction[]) {
+function addExportLabel(label: string, output: asm.AssemblyInstruction[], external = true) {
+	if (external && !isLinux) label = '_' + label
 	output.push(
 		new asm.Directive({type: 'globl', args: [label]}),
 		new asm.Label(label)
@@ -147,7 +149,7 @@ function addExportLabel(label: string, output: asm.AssemblyInstruction[]) {
 }
 function addSysvLabel(module: string, label: string, output: asm.AssemblyInstruction[]) {
 	const sysvLabel = `wasm_${module.replace(INVALID_EXPORT_CHAR, '_')}_${label}`
-	addExportLabel(sysvLabel, output)
+	addExportLabel(sysvLabel, output, true)
 	return sysvLabel
 }
 
@@ -191,7 +193,7 @@ function compileGlobals(
 		if (!directives) throw new Error('Unable to emit global of type ' + type)
 		output.push(directives.align)
 		for (const label of exportGlobals.get(i) || []) {
-			addExportLabel(context.exportLabel('GLOBAL', label), output)
+			addExportLabel(context.exportLabel('GLOBAL', label), output, false)
 			const headerLabel = `wasm_${moduleName}_${label}`
 			addExportLabel(headerLabel, output)
 			declarations.push(new GlobalDeclaration(getCType(type), !mutable, headerLabel))
@@ -341,18 +343,19 @@ export function compileFunctionBodies(
 	const {exportFunctions} = context
 	functionBodies.forEach((instructions, i) => {
 		const functionIndex = context.getFunctionIndex(i)
-		const sysvOutput: asm.AssemblyInstruction[] = []
+		const sysvLabels: asm.AssemblyInstruction[] = [],
+		      functionOutput: asm.AssemblyInstruction[] = []
 		for (const label of exportFunctions.get(functionIndex) || []) {
-			addExportLabel(context.exportLabel('FUNC', label), output)
+			addExportLabel(context.exportLabel('FUNC', label), functionOutput, false)
 			const {params, results} = functionTypes[i]
 			declarations.push(new FunctionDeclaration(
 				getCType((results as [ValueType?])[0] || 'empty'),
-				addSysvLabel(moduleName, label, sysvOutput),
+				addSysvLabel(moduleName, label, sysvLabels),
 				params.length ? params.map(getCType) : ['void']
 			))
 		}
 		const functionLabel = context.functionLabel(i)
-		output.push(new asm.Label(functionLabel))
+		functionOutput.push(new asm.Label(functionLabel))
 
 		const functionContext = context.makeFunctionContext(functionIndex)
 		const bodyOutput: asm.AssemblyInstruction[] = []
@@ -361,47 +364,62 @@ export function compileFunctionBodies(
 
 		const registersUsed = functionContext.registersUsed(true)
 		for (const register of registersUsed) {
-			output.push(new asm.PushInstruction(register))
+			functionOutput.push(new asm.PushInstruction(register))
 		}
-		const {stackLocals} = functionContext
-		if (stackLocals) output.push(growStack(stackLocals))
+		const pushedRegisters = registersUsed.length
+		const {stackParams, stackLocals} = functionContext
+		const copyDatum: asm.Datum =
+			{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+		for (let i = 0; i < stackParams; i++) {
+			// TODO: if the caller knew pushedRegisters,
+			// they could put the stack params in the right locations
+			functionOutput.push(
+				new asm.MoveInstruction(
+					new SPRelative(pushedRegisters + 1 + i).datum, // account for return address
+					copyDatum
+				),
+				new asm.MoveInstruction(
+					copyDatum, new SPRelative(-(stackParams - i)).datum
+				)
+			)
+		}
+		if (stackLocals) functionOutput.push(growStack(stackLocals))
 		functionContext.locals.forEach(({float}, i) => {
 			const datum = functionContext.resolveLocalDatum(i)
 			const zeroDatum: asm.Datum = float && datum.type === 'register'
-				? {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+				? copyDatum
 				: datum
-			output.push(new asm.MoveInstruction(
+			functionOutput.push(new asm.MoveInstruction(
 				{type: 'immediate', value: 0}, zeroDatum, 'q'
 			))
 			if (datum !== zeroDatum) {
-				output.push(new asm.MoveInstruction(zeroDatum, datum, 'q'))
+				functionOutput.push(new asm.MoveInstruction(zeroDatum, datum, 'q'))
 			}
 		})
 
-		output.push(...bodyOutput)
+		functionOutput.push(...bodyOutput)
 
-		if (!branches) popResultAndUnwind(functionContext, output)
-		output.push(new asm.Label(context.returnLabel(functionIndex)))
-		if (stackLocals) output.push(shrinkStack(stackLocals))
+		if (!branches) popResultAndUnwind(functionContext, functionOutput)
+		functionOutput.push(new asm.Label(context.returnLabel(functionIndex)))
+		if (stackLocals) functionOutput.push(shrinkStack(stackLocals))
 		for (const register of reverse(registersUsed)) {
-			output.push(new asm.PopInstruction(register))
+			functionOutput.push(new asm.PopInstruction(register))
 		}
-		output.push(new asm.RetInstruction)
+		functionOutput.push(new asm.RetInstruction)
 
-		if (sysvOutput.length) {
-			output.push(...sysvOutput)
-			const {params} = functionContext
-			const moves = new Map<asm.Register, asm.Datum>()
+		if (sysvLabels.length) {
+			output.push(...sysvLabels)
+			const moves = new Map<asm.Register, ParamTarget>()
 			let intParam = 0, floatParam = 0
-			const stackParams: asm.Datum[] = []
-			params.forEach(({float}, param) => {
+			const stackParams: ParamTarget[] = []
+			functionContext.params.forEach(({float}, param) => {
 				const source = (float
 					? SYSV_FLOAT_PARAM_REGISTERS[floatParam++]
 					: SYSV_INT_PARAM_REGISTERS[intParam++]
 				) as asm.Register | undefined
-				const datum = functionContext.resolveParamDatum(param)
-				if (source) moves.set(source, datum)
-				else stackParams.push(datum)
+				const target = functionContext.resolveParam(param)
+				if (source) moves.set(source, target)
+				else stackParams.push(target)
 			})
 			const {toRestore, output: relocateOutput} =
 				relocateArguments(moves, stackParams, SYSV_CALLEE_SAVE_SET)
@@ -416,22 +434,22 @@ export function compileFunctionBodies(
 				}
 				output.push(new asm.RetInstruction)
 			}
-			else output.push(new asm.JumpInstruction(functionLabel))
 		}
+		output.push(...functionOutput)
 	})
 }
 
 export function compileModule(module: Module): CompiledModule {
 	const parsedModule = parseSections(module)
 	const output: asm.AssemblyInstruction[] = [
-		new asm.Directive({type: 'data'}),
+		new asm.Directive({type: 'section', args: ['.data']}),
 		new asm.Directive({type: 'balign', args: [8]})
 	]
 	const declarations: HeaderDeclaration[] = []
 	const originalOutputLength = output.length
 	compileGlobals(parsedModule, output, declarations)
 	if (output.length === originalOutputLength) output.length = 0
-	output.push(new asm.Directive({type: 'text'}))
+	output.push(new asm.Directive({type: 'section', args: ['.text']}))
 	compileInitInstructions(parsedModule, output, declarations)
 	compileFunctionBodies(parsedModule, output, declarations)
 	return {instructions: output, declarations}

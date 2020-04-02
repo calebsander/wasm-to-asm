@@ -259,7 +259,7 @@ const parseIfBody =
 		]))
 	)
 const parseResultType = parseChoice([
-	parseIgnore(parseExact(0x40), parseReturn('empty')),
+	parseIgnore(parseExact(0x40), parseReturn('empty' as const)),
 	parseValueType
 ])
 const parseBlockLike = (type: 'block' | 'loop') =>

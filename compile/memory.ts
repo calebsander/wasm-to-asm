@@ -12,6 +12,7 @@ import {
 	MMAP_LENGTH_DATUM,
 	MMAP_OFFSET_DATUM,
 	MMAP_PROT_DATUM,
+	MMAP_RESULT_DATUM,
 	MMAP_SYSCALL_REGISTERS,
 	PAGE_BITS,
 	PROT_READ_WRITE,
@@ -196,7 +197,8 @@ export function compileGrowInstruction(
 	if (push) [result] = INT_INTERMEDIATE_REGISTERS
 	const datum: asm.Datum = {type: 'register', register: result!, width: 'l'}
 	output.push(
-		new asm.TestInstruction(SYSCALL_DATUM, SYSCALL_DATUM), // mmap() == -1 indicates failure
+		// mmap() < 0 indicates failure
+		new asm.TestInstruction(MMAP_RESULT_DATUM, MMAP_RESULT_DATUM),
 		new asm.JumpInstruction(failLabel, 'l'),
 		new asm.MoveInstruction(sizeLabel, datum),
 		new asm.AddInstruction(pagesDatum, sizeLabel),

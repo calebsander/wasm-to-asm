@@ -2,13 +2,14 @@ import {ResultType} from '../parse/instruction'
 import {Export, FunctionType, Global, GlobalType, Import} from '../parse/module'
 import {ValueType} from '../parse/value-type'
 import {INVALID_EXPORT_CHAR, STACK_TOP, getGeneralRegisters, isFloat} from './conventions'
+import {ParamTarget} from './helpers'
 import {Datum, Register} from './x86_64-asm'
 
 export class SPRelative {
-	private readonly stackOffset: number
+	constructor(public stackOffset: number) {}
 
-	constructor(index: number, stackValues: number) {
-		this.stackOffset = stackValues - index - 1
+	static forLocal(index: number, stackValues: number): SPRelative {
+		return new SPRelative(stackValues - index - 1)
 	}
 
 	get datum(): Datum {
@@ -185,7 +186,9 @@ export class ModuleContext {
 		return `${this.modulePrefix}_MEMSIZE`
 	}
 	get memoryStart(): number {
-		return 0x100000000 * (this.index + 1)
+		// mac OS uses 0x1xxxxxxxx for the executable and heap,
+		// so we start virtual mappings at 0x2xxxxxxxx
+		return 0x100000000 * (this.index + 2)
 	}
 	setMemoryMax(max?: number): void {
 		this.memoryMax = max
@@ -201,6 +204,7 @@ export class CompilationContext {
 	readonly result?: ValueType
 	private intLocalCount = 0
 	private floatLocalCount = 0
+	readonly stackParams: number
 	private stackFloats: boolean[] = []
 	private intStackHeight = 0
 	private floatStackHeight = 0
@@ -222,6 +226,7 @@ export class CompilationContext {
 			}
 		}
 		this.params = params.map(getLocalLocation)
+		this.stackParams = this.stackLocals
 		this.locals = locals.map(getLocalLocation)
 		this.result = result
 	}
@@ -264,13 +269,13 @@ export class CompilationContext {
 		const localIndex = paramIndex - this.params.length
 		return localIndex < 0 ? this.params[paramIndex] : this.locals[localIndex]
 	}
-	resolveParam(paramIndex: number): Register | SPRelative {
+	resolveParam(paramIndex: number): ParamTarget {
 		const {float, index} = this.getParam(paramIndex)
 		const generalRegisters = getGeneralRegisters(float)
 		const stackIndex = index - generalRegisters.length
 		return stackIndex < 0
 			? generalRegisters[index]
-			: new SPRelative( // all floats are stored after all ints
+			: SPRelative.forLocal( // all floats are stored after all ints
 					float ? this.stackIntLocals + stackIndex : stackIndex,
 					this.getValuesOnStack(false) + this.getValuesOnStack(true)
 				)
@@ -281,7 +286,7 @@ export class CompilationContext {
 			? resolved.datum
 			: {type: 'register', register: resolved}
 	}
-	resolveLocal(index: number): Register | SPRelative {
+	resolveLocal(index: number): ParamTarget {
 		return this.resolveParam(this.params.length + index)
 	}
 	resolveLocalDatum(index: number): Datum {

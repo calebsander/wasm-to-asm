@@ -1,4 +1,4 @@
-import {STACK_TOP} from './conventions'
+import {STACK_TOP, isLinux} from './conventions'
 import {growStack, shrinkStack} from './helpers'
 
 export type Register
@@ -32,11 +32,10 @@ export type JumpCond
 	| 's' | 'ns'
 
 export type GASDirective
-	= {type: 'text' | 'data', args?: void}
-	| {type: 'globl', args: [string]}
+	= {type: 'globl', args: [string]}
 	| {type: 'long' | 'quad', args: [number | string]}
 	| {type: 'balign', args: [number]}
-	| {type: 'section', args: ['.rodata']}
+	| {type: 'section', args: ['.data' | '.rodata' | '.text']}
 
 const isSIMDRegister = (register: Register) => register.startsWith('xmm')
 
@@ -125,8 +124,15 @@ abstract class JumpLikeInstruction {
 export class Directive {
 	constructor(readonly directive: GASDirective) {}
 	get str() {
-		const {type, args} = this.directive
-		return `.${type}${args ? ' ' + args.join(' ') : ''}`
+		let args: (string | number)[]
+		if (!isLinux && this.directive.type === 'section') {
+			args = this.directive.args.map(section => {
+				const lowerCase = section.replace('.', '__')
+				return lowerCase.toUpperCase() + ',' + lowerCase
+			})
+		}
+		else ({args} = this.directive)
+		return `.${this.directive.type}${args ? ' ' + args.join(' ') : ''}`
 	}
 }
 export class Label {
@@ -169,6 +175,9 @@ export class CmpInstruction extends SrcDestInstruction {
 	get op() {
 		return FLOAT_WIDTHS.has(this.width) ? 'ucomi' : 'cmp'
 	}
+}
+export class CmpOrderedInstruction extends SrcDestInstruction {
+	get op() { return 'cmpord' }
 }
 export class CvtFloatInstruction extends SrcDestInstruction {
 	constructor(
@@ -251,11 +260,14 @@ export class NotInstruction {
 export class OrInstruction extends SrcDestInstruction {
 	get op() { return 'or' }
 }
+export class OrPackedInstruction extends OrInstruction {
+	get packed() { return true }
+}
 export class PopInstruction extends FullRegisterInstruction {
 	get str() {
 		if (isSIMDRegister(this.register)) {
 			return new MoveInstruction(
-				STACK_TOP, {type: 'register', register: this.register}, 'd'
+				STACK_TOP, {type: 'register', register: this.register}, 'q'
 			).str + '\n' + shrinkStack(1).str
 		}
 		else return 'pop ' + this.registerStr
@@ -269,7 +281,7 @@ export class PushInstruction extends FullRegisterInstruction {
 	get str() {
 		if (isSIMDRegister(this.register)) {
 			return growStack(1).str + '\n' + new MoveInstruction(
-				{type: 'register', register: this.register}, STACK_TOP, 'd'
+				{type: 'register', register: this.register}, STACK_TOP, 'q'
 			).str
 		}
 		else return 'push ' + this.registerStr

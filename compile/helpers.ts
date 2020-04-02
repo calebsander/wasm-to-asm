@@ -1,5 +1,5 @@
 import {ValueType} from '../parse/value-type'
-import {CompilationContext} from './context'
+import {CompilationContext, SPRelative} from './context'
 import {
 	INT_INTERMEDIATE_REGISTERS,
 	SYSV_UNUSED_REGISTERS,
@@ -10,6 +10,7 @@ import {
 } from './conventions'
 import * as asm from './x86_64-asm'
 
+export type ParamTarget = asm.Register | SPRelative
 interface EvictedState {
 	original: asm.Register
 	current: asm.Register
@@ -43,15 +44,15 @@ function unwindStack(
 }
 
 export function relocateArguments(
-	moves: Map<asm.Register, asm.Datum>,
-	stackParams: asm.Datum[],
+	moves: Map<asm.Register, ParamTarget>,
+	stackParams: ParamTarget[],
 	saveRegisters: Set<asm.Register>
 ): RelocationResult {
 	let evicted: EvictedState | undefined
 	const toRestore: asm.Register[] = []
-	const output: asm.AssemblyInstruction[] = []
+	const output: (() => asm.AssemblyInstruction)[] = []
 	while (moves.size) {
-		let source: asm.Register, target: asm.Datum
+		let source: asm.Register, target: ParamTarget
 		if (evicted) {
 			const {original, current} = evicted
 			source = current
@@ -61,51 +62,56 @@ export function relocateArguments(
 			moves.delete(original)
 		}
 		else {
+			// TODO: optimize order of moves to avoid conflicts
 			[[source, target]] = moves
 			moves.delete(source)
 		}
 		let needsMove = true
-		if (target.type === 'register') {
-			const {register} = target
-			if (moves.has(register)) {
+		evicted = undefined
+		if (!(target instanceof SPRelative)) {
+			if (moves.has(target)) {
 				const evictTo = SYSV_UNUSED_REGISTERS
 					.find(register => register !== source)!
-				evicted = {original: register, current: evictTo}
-				output.push(new asm.MoveInstruction(
-					target, {type: 'register', register: evictTo}, 'q'
-				))
+				evicted = {original: target, current: evictTo}
+				const move = new asm.MoveInstruction(
+					{type: 'register', register: target},
+					{type: 'register', register: evictTo},
+					'q'
+				)
+				output.push(() => move)
 			}
-			else evicted = undefined
-			if (saveRegisters.has(register)) toRestore.push(register)
-			if (register === source) needsMove = false
+			if (saveRegisters.has(target)) toRestore.push(target)
+			if (source === target) needsMove = false
 		}
-		else evicted = undefined
 		if (needsMove) {
-			output.push(new asm.MoveInstruction(
-				{type: 'register', register: source}, target, 'q'
-			))
+			const move = new asm.MoveInstruction(
+				{type: 'register', register: source},
+				target instanceof SPRelative
+					? target.datum
+					: {type: 'register', register: target},
+				'q'
+			)
+			output.push(() => move)
 		}
 	}
-	for (const datum of stackParams) {
+	stackParams.forEach((target, i) => {
 		let register: asm.Register
-		let intermediate: boolean
-		if (datum.type === 'register') {
-			({register} = datum)
-			intermediate = false
-			if (saveRegisters.has(register)) toRestore.push(register)
-		}
+		if (target instanceof SPRelative) [register] = INT_INTERMEDIATE_REGISTERS
 		else {
-			[register] = INT_INTERMEDIATE_REGISTERS // can't move directly to SIMD
-			intermediate = true
+			register = target
+			if (saveRegisters.has(target)) toRestore.push(target)
 		}
-		output.push(new asm.PopInstruction(register))
-		if (intermediate) {
-			output.push(new asm.MoveInstruction(
-				{type: 'register', register}, datum, 'q'
-			))
+		const datum: asm.Datum = {type: 'register', register}
+		output.push(() =>
+			new asm.MoveInstruction(new SPRelative(savedValues + i).datum, datum)
+		)
+		if (target instanceof SPRelative) {
+			const move = new asm.MoveInstruction(datum, target.datum)
+			output.push(() => move)
 		}
-	}
-	return {toRestore, output}
+	})
+	const savedValues = toRestore.length
+	return {toRestore, output: output.map(instruction => instruction())}
 }
 export function compileBranch(
 	nesting: number,

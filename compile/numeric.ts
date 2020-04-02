@@ -1,7 +1,7 @@
 import {ConstInstruction} from '../parse/instruction'
 import {ValueType} from '../parse/value-type'
 import {convertFloatToInt} from '../util'
-import {CompilationContext} from './context'
+import {CompilationContext, SPRelative} from './context'
 import {
 	DIV_LOWER_DATUM,
 	DIV_LOWER_REGISTER,
@@ -53,7 +53,9 @@ const FLOAT_BINARY_OPERATIONS = new Map([
 	['add', asm.AddInstruction],
 	['sub', asm.SubInstruction],
 	['mul', asm.MulInstruction],
-	['div', asm.DivBinaryInstruction],
+	['div', asm.DivBinaryInstruction]
+])
+const MIN_MAX_OPERATIONS = new Map([
 	['min', asm.MinInstruction],
 	['max', asm.MaxInstruction]
 ])
@@ -271,7 +273,7 @@ export function compileIntDivInstruction(
 	const operand1 = context.resolvePop()
 	const datum1: asm.Datum = operand1
 		? {type: 'register', register: operand1}
-		: {...STACK_TOP, immediate: 8}
+		: new SPRelative(1).datum
 	const result = op === 'div' ? DIV_LOWER_DATUM : DIV_UPPER_DATUM
 	if (operand1 !== DIV_LOWER_REGISTER) {
 		output.push(new asm.MoveInstruction(datum1, DIV_LOWER_DATUM))
@@ -372,8 +374,8 @@ export function compileFloatUnaryInstruction(
 }
 export function compileFloatBinaryInstruction(
 	instruction:
-		'f32.add' | 'f32.sub' | 'f32.mul' | 'f32.div' | 'f32.min' | 'f32.max' |
-		'f64.add' | 'f64.sub' | 'f64.mul' | 'f64.div' | 'f64.min' | 'f64.max',
+		'f32.add' | 'f32.sub' | 'f32.mul' | 'f32.div' |
+		'f64.add' | 'f64.sub' | 'f64.mul' | 'f64.div',
 	context: CompilationContext,
 	output: asm.AssemblyInstruction[]
 ): void {
@@ -384,7 +386,7 @@ export function compileFloatBinaryInstruction(
 	}
 	const width = typeWidth(type)
 	const operand2 = context.resolvePop()
-	const datum2 : asm.Datum = operand2
+	const datum2: asm.Datum = operand2
 		? {type: 'register', register: operand2}
 		: STACK_TOP
 	let operand1 = context.resolvePop()
@@ -392,12 +394,55 @@ export function compileFloatBinaryInstruction(
 	if (onStack) {
 		[operand1] = FLOAT_INTERMEDIATE_REGISTERS
 		output.push(new asm.MoveInstruction(
-			{...STACK_TOP, immediate: 8}, {type: 'register', register: operand1}, 'q'
+			new SPRelative(1).datum, {type: 'register', register: operand1}, 'q'
 		))
 	}
 	const datum1: asm.Datum = {type: 'register', register: operand1!}
 	output.push(new arithmeticInstruction(datum2, datum1, width))
 	if (!operand2) output.push(shrinkStack(1))
+	if (onStack) output.push(new asm.MoveInstruction(datum1, STACK_TOP, 'q'))
+	context.push(true)
+}
+export function compileMinMaxInstruction(
+	instruction: 'f32.min' | 'f32.max' | 'f64.min' | 'f64.max',
+	context: CompilationContext,
+	output: asm.AssemblyInstruction[]
+) {
+	const [type, operation] = instruction.split('.') as [ValueType, string]
+	const minMaxInstruction = MIN_MAX_OPERATIONS.get(operation)
+	if (!minMaxInstruction) {
+		throw new Error('No arithmetic instruction found for ' + instruction)
+	}
+	const width = typeWidth(type)
+	const operand2 = context.resolvePop()
+	const datum2: asm.Datum = operand2
+		? {type: 'register', register: operand2}
+		: STACK_TOP
+	let operand1 = context.resolvePop()
+	const onStack = !operand1
+	if (onStack) {
+		[operand1] = FLOAT_INTERMEDIATE_REGISTERS
+		output.push(new asm.MoveInstruction(
+			new SPRelative(1).datum, {type: 'register', register: operand1}, 'q'
+		))
+	}
+	const datum1: asm.Datum = {type: 'register', register: operand1!}
+	const datum1Orig: asm.Datum =
+		{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[1]}
+	const nanMaskDatum: asm.Datum =
+		{type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[2]}
+	// x86_64 min/max ignore NaN in the destination, so we need to check for it
+	output.push(
+		new asm.MoveInstruction(datum1, datum1Orig, width),
+		new asm.MoveInstruction(datum1, nanMaskDatum, width),
+		new asm.CmpOrderedInstruction(datum1, nanMaskDatum, width),
+		new minMaxInstruction(datum2, datum1, width),
+		// Store min(datum1, datum2) in datum1 iff datum1 is not NaN
+		new asm.AndPackedInstruction(nanMaskDatum, datum1, width),
+		// Store datum1 in nanMaskDatum iff datum1 is NaN
+		new asm.AndNotPackedInstruction(datum1Orig, nanMaskDatum, width),
+		new asm.OrPackedInstruction(nanMaskDatum, datum1, width)
+	)
 	if (onStack) output.push(new asm.MoveInstruction(datum1, STACK_TOP, 'q'))
 	context.push(true)
 }

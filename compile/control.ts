@@ -16,7 +16,7 @@ import {
 	getResultRegister,
 	isFloat
 } from './conventions'
-import {compileBranch, growStack, relocateArguments, shrinkStack} from './helpers'
+import {compileBranch, growStack, ParamTarget, relocateArguments, shrinkStack} from './helpers'
 import {compileInstructions} from './instructions'
 import * as asm from './x86_64-asm'
 
@@ -207,7 +207,7 @@ export function compileBranchTableInstruction(
 		))
 	}
 	output.push(
-		new asm.Directive({type: 'text'}),
+		new asm.Directive({type: 'section', args: ['.text']}),
 		...caseOutput
 	)
 	return {branches, definitely: true}
@@ -240,33 +240,27 @@ export function compileCallInstruction(
 			: new asm.PopInstruction(indexRegister)
 		)
 	}
-	const {params, result} = otherContext
+	const {params, result, stackLocals} = otherContext
 	const registersUsed = new Set(context.registersUsed())
-	const moves = new Map<asm.Register, asm.Datum>()
-	const stackParams: asm.Datum[] = []
+	const moves = new Map<asm.Register, ParamTarget>()
+	const stackParams: ParamTarget[] = []
+	let calleeStackParams = 0
 	for (let i = params.length - 1; i >= 0; i--) {
 		const source = context.resolvePop()
 		const target = otherContext.resolveParam(i)
-		const datum: asm.Datum = target instanceof SPRelative
-			? target.datum
-			: {type: 'register', register: target}
-		if (source) moves.set(source, datum)
-		else stackParams.push(datum)
+		if (target instanceof SPRelative) {
+			target.stackOffset -= stackLocals
+			calleeStackParams++
+		}
+		if (source) moves.set(source, target)
+		else stackParams.push(target)
 	}
 	const {toRestore, output: relocateOutput} =
 		relocateArguments(moves, stackParams, registersUsed)
-	const pushedRegisters = toRestore.length
-	toRestore.forEach((register, i) => {
-		output.push(new asm.MoveInstruction(
-			{type: 'register', register},
-			{type: 'indirect', register: 'rsp', immediate: -(i + 1) << 3},
-			'q'
-		))
-	})
+	for (const register of toRestore) output.push(new asm.PushInstruction(register))
 	output.push(...relocateOutput)
-	const stackPopped = stackParams.length
-	if (pushedRegisters) { // point to end of pushedRegisters
-		output.push(growStack(stackPopped + pushedRegisters))
+	if (calleeStackParams) { // point to end of pushed parameters
+		output.push(growStack(calleeStackParams))
 	}
 	if (instruction.type === 'call') {
 		output.push(new asm.CallInstruction(
@@ -274,23 +268,27 @@ export function compileCallInstruction(
 		))
 	}
 	else {
-		const table = {register: INT_INTERMEDIATE_REGISTERS[2]}
+		const tableRegister = INT_INTERMEDIATE_REGISTERS[2]
 		output.push(
 			new asm.LeaInstruction(
 				{type: 'label', label: moduleContext.tableLabel(0)},
-				{type: 'register', ...table}
+				{type: 'register', register: tableRegister}
 			),
 			new asm.CallInstruction({
 				type: 'indirect',
-				...table,
+				register: tableRegister,
 				offset: {register: indexRegister!, scale: 8}
 			})
 		)
 	}
+	if (calleeStackParams) { // pop parameters passed on the stack
+		output.push(shrinkStack(calleeStackParams))
+	}
 	for (const register of reverse(toRestore)) {
 		output.push(new asm.PopInstruction(register))
 	}
-	if (pushedRegisters && stackPopped) { // point to actual stack location
+	const stackPopped = stackParams.length
+	if (stackPopped) { // point to actual stack location
 		output.push(shrinkStack(stackPopped))
 	}
 	if (result) {

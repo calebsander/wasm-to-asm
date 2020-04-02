@@ -30,7 +30,7 @@ const TESTS = [
 	'float_misc',
 	'forward',
 	'func',
-	'globals',
+	'global',
 	'i32',
 	'i64',
 	'if',

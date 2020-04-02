@@ -2,6 +2,11 @@ import {ValueType} from '../parse/value-type'
 import {makeArray} from '../util'
 import {Datum, Register, Width} from './x86_64-asm'
 
+if (!['darwin', 'linux'].includes(process.platform)) {
+	throw new Error(`Unsupported platform ${process.platform}`)
+}
+export const isLinux = process.platform === 'linux'
+
 export const INT_INTERMEDIATE_REGISTERS: Register[] = ['rax', 'rcx', 'rdx']
 export const [INT_RESULT_REGISTER] = INT_INTERMEDIATE_REGISTERS
 export const INT_GENERAL_REGISTERS: Register[] = [
@@ -46,6 +51,8 @@ export const SYSV_UNUSED_REGISTERS: Register[] = ['rax', 'xmm15']
 
 export const STACK_TOP = {type: 'indirect' as const, register: 'rsp' as Register}
 
+// Registers clobbered by mmap() syscall.
+// These are the same 6 argument registers plus %rcx and %r11 on Linux and macOS.
 export const MMAP_SYSCALL_REGISTERS = new Set(
 	new Array<Register>('rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9', 'rcx', 'r11')
 		.filter(register => INT_GENERAL_REGISTERS.includes(register))
@@ -58,17 +65,19 @@ export const SYSCALL_DATUM: Datum = {type: 'register', register: 'rax'},
 	MMAP_PROT_DATUM: Datum = {type: 'register', register: 'rdx'},
 	MMAP_FLAGS_DATUM: Datum = {type: 'register', register: 'r10'},
 	MMAP_FD_DATUM: Datum = {type: 'register', register: 'r8'},
-	MMAP_OFFSET_DATUM: Datum = {type: 'register', register: 'r9'}
+	MMAP_OFFSET_DATUM: Datum = {type: 'register', register: 'r9'},
+	MMAP_RESULT_DATUM: Datum = {type: 'register', register: 'rax'}
 export const PAGE_BITS: Datum = {type: 'immediate', value: 16}
 // PROT_READ | PROT_WRITE
 export const PROT_READ_WRITE: Datum = {type: 'immediate', value: 0x1 | 0x2}
+const MAP_ANONYMOUS = isLinux ? 0x20 : 0x1000
 // MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS
-export const MMAP_FLAGS: Datum = {type: 'immediate', value: 0x01 | 0x10 | 0x20}
+export const MMAP_FLAGS: Datum = {type: 'immediate', value: 0x01 | 0x10 | MAP_ANONYMOUS}
 
-export const SYSCALL = {
-	exit: 60,
-	mmap: 9
-}
+const DARWIN_SYSCALL_OFFSET = 0x2000000
+export const SYSCALL = isLinux
+	? {exit: 60, mmap: 9}
+	: {exit: DARWIN_SYSCALL_OFFSET + 1, mmap: DARWIN_SYSCALL_OFFSET + 197}
 
 export const INVALID_EXPORT_CHAR = /[^A-Za-z\d_]/g
 

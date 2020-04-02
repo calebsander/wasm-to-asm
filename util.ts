@@ -1,6 +1,6 @@
 export const makeArray = <A>(len: number, init: (index: number) => A): A[] =>
 	new Array(len).fill(0).map((_, i) => init(i))
-export function* reverse<A>(arr: A[]): IterableIterator<A> {
+export function* reverse<A>(arr: A[]): Generator<A, void> {
 	for (let i = arr.length - 1; i >= 0; i--) yield arr[i]
 }
 
