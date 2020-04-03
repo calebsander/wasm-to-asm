@@ -156,6 +156,12 @@ export class AndNotPackedInstruction extends SrcDestInstruction {
 	get op() { return 'andn' }
 	get packed() { return true }
 }
+export class BsfInstruction extends SrcDestInstruction {
+	get op() { return 'bsf' }
+}
+export class BsrInstruction extends SrcDestInstruction {
+	get op() { return 'bsr' }
+}
 export class CallInstruction extends JumpLikeInstruction {
 	get op() { return 'call' }
 }

@@ -45,8 +45,8 @@ const INT_ARITHMETIC_OPERATIONS = new Map([
 ])
 const SHIFT_OPERATIONS = new Set(['shl', 'shr_s', 'shr_u', 'rotl', 'rotr'])
 const BIT_COUNT_OPERATIONS = new Map([
-	['clz', asm.LzcntInstruction],
-	['ctz', asm.TzcntInstruction],
+	['clz', asm.BsrInstruction],
+	['ctz', asm.BsfInstruction],
 	['popcnt', asm.PopcntInstruction]
 ])
 const FLOAT_BINARY_OPERATIONS = new Map([
@@ -165,18 +165,34 @@ export function compileBitCountInstruction(
 	if (!asmInstruction) throw new Error('No instruction found for ' + instruction)
 
 	const arg = context.resolvePop()
-	if (arg) {
-		const datum: asm.Datum = {type: 'register', register: arg, width}
-		output.push(new asmInstruction(datum, datum))
-	}
-	else {
-		const result: asm.Datum =
-			{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0], width}
+	const datum: asm.Datum = arg
+		? {type: 'register', register: arg, width}
+		: STACK_TOP
+	const result: asm.Datum = arg
+		? datum
+		: {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0], width}
+	output.push(new asmInstruction(datum, result))
+	if (operation !== 'popcnt') {
+		// BSF and BSR are undefined on inputs that are 0
+		const widthBits = Number(type.slice(1))
+		const clz = operation === 'clz'
+		const widthDatum: asm.Datum =
+			{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1], width}
 		output.push(
-			new asmInstruction(STACK_TOP, result),
-			new asm.MoveInstruction(result, STACK_TOP)
+			new asm.MoveInstruction(
+				{type: 'immediate', value: clz ? -1 : widthBits}, widthDatum
+			),
+			new asm.CMoveInstruction(widthDatum, result, 'e')
 		)
+		if (clz) {
+			// BSR's output needs to be flipped
+			output.push(
+				new asm.NotInstruction(result),
+				new asm.AddInstruction({type: 'immediate', value: widthBits}, result)
+			)
+		}
 	}
+	if (result !== datum) output.push(new asm.MoveInstruction(result, datum))
 	context.push(false)
 }
 export function compileIntArithmeticInstruction(
