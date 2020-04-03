@@ -27,5 +27,5 @@ int main() {
 	wasm_sha256_init_module();
 	for (unsigned length = 0; length < 1 << 12; length++) verify_hash(length);
 	verify_hash(1 << 24);
-	printf("success");
+	puts("success");
 }

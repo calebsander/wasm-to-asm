@@ -1,14 +1,22 @@
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import {promisify} from 'util'
+import test, {ExecutionContext} from 'ava'
 import {INVALID_EXPORT_CHAR} from '../compile/conventions'
 import {parse, SExpression} from './parse-s'
 
+process.chdir(__dirname)
+
 const CC = 'clang'
-const OPENSSL_CFLAGS = ['-I/usr/local/opt/openssl/include', '-L/usr/local/opt/openssl/lib']
+const OPENSSL_CFLAGS = [
+	'-I/usr/local/opt/openssl/include',
+	'-L/usr/local/opt/openssl/lib',
+	'-lcrypto'
+]
 const C_NAN = 'NAN'
 const SUCCESS = 'success'
 const TESTS = [
+	'align',
 	'address',
 	'block',
 	'br',
@@ -59,65 +67,36 @@ const TESTS = [
 ]
 const FUNC_NAME = /^"(.+)"$/
 const TESTS_START = /\n\((?:assert_return|assert_trap|invoke)/
+const C_FILE_START = (test: string) => `
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include "${test}.h"
+
+int main() {
+`
+const C_FILE_END = `
+	puts("${SUCCESS}");
+}
+`
 
 const exec = promisify(childProcess.exec),
       execFile = promisify(childProcess.execFile),
       readFile = promisify(fs.readFile),
       writeFile = promisify(fs.writeFile)
 
-async function compileTest(test: string, ...ccArgs: string[]) {
-	const baseFile = `${__dirname}/${test}`
-	const wasmFile = baseFile + '.wasm'
-	await execFile(__dirname + '/wabt/bin/wat2wasm', [baseFile + '.wast', '-o', wasmFile])
-	await execFile('node', [__dirname + '/../main.js', wasmFile])
-	const runPath = baseFile + '-test'
-	await execFile(CC, [baseFile + '.s', runPath + '.c', '-o', runPath, ...ccArgs])
-	return {baseFile, runPath}
+async function compileTest(test: string, ...ccArgs: string[]): Promise<string> {
+	const wasmFile = test + '.wasm'
+	await execFile('wabt/bin/wat2wasm', [test + '.wast', '-o', wasmFile])
+	await execFile('node', ['../main.js', wasmFile])
+	const runPath = test + '-test'
+	await execFile(CC, [test + '.s', runPath + '.c', '-o', runPath, ...ccArgs])
+	return './' + runPath
 }
-function checkSuccessOutput({stdout}: {stdout: string}) {
-	if (stdout !== SUCCESS) throw new Error('Unexpected output:\n' + stdout)
-}
-async function fibTest() {
-	const test = 'fib'
-	try {
-		const {baseFile, runPath} = await compileTest(test)
-		await exec(`${runPath} | diff ${baseFile}-expected.txt -`)
-	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-
-	return {test, testCount: 1}
-}
-async function sha256Test() {
-	const test = 'sha256'
-	try {
-		const {runPath} = await compileTest(test, ...OPENSSL_CFLAGS, '-lcrypto')
-		checkSuccessOutput(await execFile(runPath))
-	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-
-	return {test, testCount: 1}
-}
-async function trigTest() {
-	const test = 'trig'
-	try {
-		const {runPath} = await compileTest(test, '-lm')
-		checkSuccessOutput(await execFile(runPath))
-	}
-	catch (e) {
-		console.error(e)
-		return {test}
-	}
-
-	return {test, testCount: 2}
-}
-
-function getValue(expression: SExpression) {
+const checkSuccessOutput = (t: ExecutionContext, {stdout}: {stdout: string}) =>
+	t.is(stdout, SUCCESS + '\n', 'Unexpected output:\n' + stdout)
+const exportName = (name: string): string => name.replace(INVALID_EXPORT_CHAR, '_')
+function getValue(expression: SExpression): string {
 	if (expression.type === 'atom') {
 		throw new Error('Invalid expression: ' + JSON.stringify(expression))
 	}
@@ -155,9 +134,9 @@ function getValue(expression: SExpression) {
 	}
 }
 
-(async () => {
-	const results = await Promise.all(TESTS.map(async test => {
-		const wastPath = `${__dirname}/spec/test/core/${test}.wast`
+for (const testName of TESTS) {
+	test(testName, async t => {
+		const wastPath = `spec/test/core/${testName}.wast`
 		let testFile = await readFile(wastPath, 'utf8')
 		let assertStartMatch: RegExpMatchArray | null
 		let testCount = 0
@@ -171,26 +150,13 @@ function getValue(expression: SExpression) {
 			}
 			await writeFile(modulePath, testFile.slice(0, assertsStart))
 			const wasmPath = wastPath.replace('.wast', '.wasm')
-			try {
-				await execFile(__dirname + '/wabt/bin/wat2wasm', [modulePath, '-o', wasmPath])
-				await execFile('node', [__dirname + '/../main.js', wasmPath])
-			}
-			catch (e) {
-				console.error(e)
-				return {test}
-			}
+			await execFile('wabt/bin/wat2wasm', [modulePath, '-o', wasmPath])
+			await execFile('node', ['../main.js', wasmPath])
 
-			let cFile = `
-				#include <assert.h>
-				#include <math.h>
-				#include <stdio.h>
-				#include "${test}.h"
-
-				int main() {
-			`
+			let cFile = C_FILE_START(testName)
 			const hFilePath = wasmPath.replace('.wasm', '.h')
 			const headerFile = await readFile(hFilePath, 'utf8')
-			const initFunction = `wasm_${test.replace(INVALID_EXPORT_CHAR, '_')}_init_module`
+			const initFunction = `wasm_${exportName(testName)}_init_module`
 			const hasInit = headerFile.includes(`void ${initFunction}(void);`)
 			if (hasInit) cFile += initFunction + '();\n'
 			let asserts = nextModule < 0
@@ -201,7 +167,7 @@ function getValue(expression: SExpression) {
 				if (result.type === 'atom') throw new Error('Not a test: ' + JSON.stringify(result))
 				const [op, ...args] = result.items
 				if (op.type !== 'atom') throw new Error('Not a test: ' + JSON.stringify(result))
-				let processed = true
+				let processed: boolean
 				switch (op.atom) {
 					case 'module':
 						break makeTests
@@ -217,8 +183,7 @@ function getValue(expression: SExpression) {
 						}
 						const funcNameMatch = FUNC_NAME.exec(func.atom)
 						if (!funcNameMatch) throw new Error('Not a function name: ' + func.atom)
-						const funcName =
-							`wasm_${test}_${funcNameMatch[1]}`.replace(INVALID_EXPORT_CHAR, '_')
+						const funcName = exportName(`wasm_${testName}_${funcNameMatch[1]}`)
 						const functionCall = `${funcName}(${funcArgs.map(getValue).join(', ')})`
 						if (expected) {
 							const value = getValue(expected)
@@ -227,6 +192,7 @@ function getValue(expression: SExpression) {
 								: `assert(${functionCall} == ${value});\n`
 						}
 						else cFile += functionCall + ';\n'
+						processed = true
 						break
 					case 'assert_exhaustion':
 					case 'assert_invalid':
@@ -242,40 +208,31 @@ function getValue(expression: SExpression) {
 				if (processed) testCount++
 				asserts = rest
 			}
-			cFile += `
-					printf("${SUCCESS}");
-				}
-			`
+			cFile += C_FILE_END
 			testFile = testFile.slice(nextModule)
 			const sFilePath = hFilePath.replace('.h', '.s'),
 			      cFilePath = sFilePath.replace('.s', '-test.c'),
 			      runPath = cFilePath.replace('.c', '')
 			await writeFile(cFilePath, cFile)
-			try {
-				await execFile(CC, [sFilePath, cFilePath, '-o', runPath])
-				checkSuccessOutput(await execFile(runPath))
-			}
-			catch (e) {
-				console.error(e)
-				return {test}
-			}
+			await execFile(CC, [sFilePath, cFilePath, '-o', runPath])
+			checkSuccessOutput(t, await execFile(runPath))
 		}
-		return {test, testCount}
-	}).concat([
-		fibTest(),
-		sha256Test(),
-		trigTest()
-	]))
+		t.log(`Passed ${testCount} tests`)
+	})
+}
 
-	let passes = 0
-	for (const {test, testCount} of results) {
-		if (testCount) {
-			console.log(test, `PASS ${testCount} test${testCount === 1 ? '' : 's'}`)
-			passes++
-		}
-		else console.log(test, 'FAIL')
-	}
-	const testsCount = results.length
-	console.log(`${passes} of ${testsCount} tests passed (${Math.floor(passes / testsCount * 100)}%)`)
-	process.exit(testsCount - passes)
-})()
+test('fib', async t => {
+	const {title} = t
+	const runPath = await compileTest(title)
+	await exec(`${runPath} | diff ${title}-expected.txt -`)
+	t.pass()
+})
+test('sha256', async t => {
+	const runPath = await compileTest(t.title, ...OPENSSL_CFLAGS)
+	checkSuccessOutput(t, await execFile(runPath))
+})
+test('trig', async t => {
+	const {title} = t
+	const runPath = await compileTest(title, '-lm')
+	checkSuccessOutput(t, await execFile(runPath))
+})

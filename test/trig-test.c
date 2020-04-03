@@ -12,5 +12,5 @@ int main() {
 		assert(fabs(wasm_trig_sin(x) - sin(x)) < SIN_TOLERANCE);
 		assert(fabs(wasm_trig_cos(x) - cos(x)) < COS_TOLERANCE);
 	}
-	printf("success");
+	puts("success");
 }

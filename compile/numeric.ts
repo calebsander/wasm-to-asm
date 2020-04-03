@@ -180,15 +180,14 @@ export function compileBitCountInstruction(
 			{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1], width}
 		output.push(
 			new asm.MoveInstruction(
-				{type: 'immediate', value: clz ? -1 : widthBits}, widthDatum
+				{type: 'immediate', value: clz ? (widthBits << 1) - 1 : widthBits}, widthDatum
 			),
 			new asm.CMoveInstruction(widthDatum, result, 'e')
 		)
 		if (clz) {
 			// BSR's output needs to be flipped
 			output.push(
-				new asm.NotInstruction(result),
-				new asm.AddInstruction({type: 'immediate', value: widthBits}, result)
+				new asm.XorInstruction({type: 'immediate', value: widthBits - 1}, result)
 			)
 		}
 	}
