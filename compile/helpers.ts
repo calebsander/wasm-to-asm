@@ -46,7 +46,8 @@ function unwindStack(
 export function relocateArguments(
 	moves: Map<asm.Register, ParamTarget>,
 	stackParams: ParamTarget[],
-	saveRegisters: Set<asm.Register>
+	saveRegisters: Set<asm.Register>,
+	stackOffset = 0
 ): RelocationResult {
 	let evicted: EvictedState | undefined
 	const toRestore: asm.Register[] = []
@@ -102,8 +103,8 @@ export function relocateArguments(
 			if (saveRegisters.has(target)) toRestore.push(target)
 		}
 		const datum: asm.Datum = {type: 'register', register}
-		output.push(() =>
-			new asm.MoveInstruction(new SPRelative(savedValues + i).datum, datum)
+		output.push(() => new asm.MoveInstruction(
+			new SPRelative(stackOffset + savedValues + i).datum, datum)
 		)
 		if (target instanceof SPRelative) {
 			const move = new asm.MoveInstruction(datum, target.datum)

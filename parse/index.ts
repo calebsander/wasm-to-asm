@@ -74,8 +74,8 @@ export const parseByOpcode = <A>(parsers: Map<number, Parser<A>>) =>
 		return parser
 	})
 export const parseUnsigned: Parser<number> = parseAndThen(parseByte, n =>
-	n & 0b10000000
-		? parseMap(parseUnsigned, m => (m << 7 | (n & 0b01111111)) >>> 0)
+	n >> 7
+		? parseMap(parseUnsigned, m => (m << 7 | (n & ~(1 << 7))) >>> 0)
 		: parseReturn(n)
 )
 export const parseVector = <A>(parser: Parser<A>) =>

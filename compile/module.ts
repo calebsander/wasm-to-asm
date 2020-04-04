@@ -361,6 +361,7 @@ export function compileFunctionBodies(
 		const bodyOutput: asm.AssemblyInstruction[] = []
 		const branches =
 			compileInstructions(instructions, functionContext, bodyOutput).definitely
+		if (!branches) popResultAndUnwind(functionContext, bodyOutput)
 
 		const registersUsed = functionContext.registersUsed(true)
 		for (const register of registersUsed) {
@@ -399,7 +400,6 @@ export function compileFunctionBodies(
 
 		functionOutput.push(...bodyOutput)
 
-		if (!branches) popResultAndUnwind(functionContext, functionOutput)
 		functionOutput.push(new asm.Label(context.returnLabel(functionIndex)))
 		if (stackLocals) functionOutput.push(shrinkStack(stackLocals))
 		for (const register of reverse(registersUsed)) {
@@ -409,26 +409,38 @@ export function compileFunctionBodies(
 
 		if (sysvLabels.length) {
 			output.push(...sysvLabels)
+			const {params, stackLocals} = functionContext
 			const moves = new Map<asm.Register, ParamTarget>()
 			let intParam = 0, floatParam = 0
 			const stackParams: ParamTarget[] = []
-			functionContext.params.forEach(({float}, param) => {
+			let calleeStackParams = 0
+			params.forEach(({float}, param) => {
 				const source = (float
 					? SYSV_FLOAT_PARAM_REGISTERS[floatParam++]
 					: SYSV_INT_PARAM_REGISTERS[intParam++]
 				) as asm.Register | undefined
 				const target = functionContext.resolveParam(param)
+				if (target instanceof SPRelative) {
+					target.stackOffset -= stackLocals
+					calleeStackParams++
+				}
 				if (source) moves.set(source, target)
 				else stackParams.push(target)
 			})
 			const {toRestore, output: relocateOutput} =
-				relocateArguments(moves, stackParams, SYSV_CALLEE_SAVE_SET)
+				relocateArguments(moves, stackParams, SYSV_CALLEE_SAVE_SET, 1)
 			for (const register of toRestore) {
 				output.push(new asm.PushInstruction(register))
 			}
 			output.push(...relocateOutput)
-			if (toRestore.length) {
+			if (toRestore.length || calleeStackParams) {
+				if (calleeStackParams) { // point to end of pushed parameters
+					output.push(growStack(calleeStackParams))
+				}
 				output.push(new asm.CallInstruction(functionLabel))
+				if (calleeStackParams) { // pop parameters passed on the stack
+					output.push(shrinkStack(calleeStackParams))
+				}
 				for (const register of reverse(toRestore)) {
 					output.push(new asm.PopInstruction(register))
 				}

@@ -1,17 +1,7 @@
 spec
 wabt
 
-fib.h
-fib.s
-fib.wasm
-fib-test
-
-sha256.h
-sha256.s
-sha256.wasm
-sha256-test
-
-trig.h
-trig.s
-trig.wasm
-trig-test
+*.h
+*.s
+*.wasm
+*-test

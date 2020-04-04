@@ -137,10 +137,8 @@ To call WebAssembly functions from C or similar languages, the compiler must use
 
 There are several features that aren't supported yet:
 - Linking multiple WebAssembly modules to each other
-- Functions taking more than 12 int params or 13 float params
 - Runtime traps (out-of-bounds memory access, division by 0, etc.)
 - Optimizations for multiple-instruction sequences (e.g. incrementing a local)
-- Support for `mmap()` syscalls on Mac OS
 
 ## Calling convention
 

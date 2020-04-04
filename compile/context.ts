@@ -43,6 +43,7 @@ interface FunctionStats {
 interface LocalLocation {
 	float: boolean
 	index: number
+	stackIndex?: number
 }
 export interface StackState {
 	intStackHeight: number
@@ -218,15 +219,18 @@ export class CompilationContext {
 		{params, locals, result}: FunctionStats,
 		private readonly index?: number
 	) {
+		let stackIndex = 0
 		const getLocalLocation = (param: ValueType): LocalLocation => {
 			const float = isFloat(param)
-			return {
-				float,
-				index: float ? this.floatLocalCount++ : this.intLocalCount++
+			const index = float ? this.floatLocalCount++ : this.intLocalCount++
+			const location: LocalLocation = {float, index}
+			if (index >= getGeneralRegisters(float).length) {
+				location.stackIndex = stackIndex++
 			}
+			return location
 		}
 		this.params = params.map(getLocalLocation)
-		this.stackParams = this.stackLocals
+		this.stackParams = stackIndex
 		this.locals = locals.map(getLocalLocation)
 		this.result = result
 	}
@@ -270,13 +274,12 @@ export class CompilationContext {
 		return localIndex < 0 ? this.params[paramIndex] : this.locals[localIndex]
 	}
 	resolveParam(paramIndex: number): ParamTarget {
-		const {float, index} = this.getParam(paramIndex)
+		const {float, index, stackIndex} = this.getParam(paramIndex)
 		const generalRegisters = getGeneralRegisters(float)
-		const stackIndex = index - generalRegisters.length
-		return stackIndex < 0
+		return stackIndex === undefined
 			? generalRegisters[index]
-			: SPRelative.forLocal( // all floats are stored after all ints
-					float ? this.stackIntLocals + stackIndex : stackIndex,
+			: SPRelative.forLocal(
+					stackIndex,
 					this.getValuesOnStack(false) + this.getValuesOnStack(true)
 				)
 	}

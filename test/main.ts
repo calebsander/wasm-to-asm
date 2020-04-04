@@ -15,7 +15,7 @@ const OPENSSL_CFLAGS = [
 ]
 const C_NAN = 'NAN'
 const SUCCESS = 'success'
-const TESTS = [
+const SPEC_TESTS = [
 	'align',
 	'address',
 	'block',
@@ -64,6 +64,11 @@ const TESTS = [
 	'store',
 	'switch',
 	'unwind'
+]
+const PROGRAM_TESTS = [
+	{name: 'sha256', flags: OPENSSL_CFLAGS},
+	{name: 'trig', flags: ['-lm']},
+	{name: 'params', flags: []}
 ]
 const FUNC_NAME = /^"(.+)"$/
 const TESTS_START = /\n\((?:assert_return|assert_trap|invoke)/
@@ -134,7 +139,7 @@ function getValue(expression: SExpression): string {
 	}
 }
 
-for (const testName of TESTS) {
+for (const testName of SPEC_TESTS) {
 	test(testName, async t => {
 		const wastPath = `spec/test/core/${testName}.wast`
 		let testFile = await readFile(wastPath, 'utf8')
@@ -188,8 +193,8 @@ for (const testName of TESTS) {
 						if (expected) {
 							const value = getValue(expected)
 							cFile += value.includes(C_NAN)
-								? `assert(isnan(${functionCall}));\n`
-								: `assert(${functionCall} == ${value});\n`
+								? `\tassert(isnan(${functionCall}));\n`
+								: `\tassert(${functionCall} == ${value});\n`
 						}
 						else cFile += functionCall + ';\n'
 						processed = true
@@ -227,12 +232,9 @@ test('fib', async t => {
 	await exec(`${runPath} | diff ${title}-expected.txt -`)
 	t.pass()
 })
-test('sha256', async t => {
-	const runPath = await compileTest(t.title, ...OPENSSL_CFLAGS)
-	checkSuccessOutput(t, await execFile(runPath))
-})
-test('trig', async t => {
-	const {title} = t
-	const runPath = await compileTest(title, '-lm')
-	checkSuccessOutput(t, await execFile(runPath))
-})
+for (const {name, flags} of PROGRAM_TESTS) {
+	test(name, async t => {
+		const runPath = await compileTest(name, ...flags)
+		checkSuccessOutput(t, await execFile(runPath))
+	})
+}

@@ -271,10 +271,8 @@ const parseBranchLike = (type: 'br' | 'br_if') =>
 const parseFixedInstruction = <TYPE extends string>(type: TYPE) =>
 	parseReturn({type})
 const parseSigned: Parser<bigint> = parseAndThen(parseByte, n =>
-	n & 0b10000000
-		? parseMap(parseSigned, m =>
-				m << 7n | BigInt.asUintN(7, BigInt(n))
-			)
+	n >> 7
+		? parseMap(parseSigned, m => m << 7n | BigInt.asUintN(7, BigInt(n)))
 		: parseReturn(BigInt.asIntN(7, BigInt(n))) // sign-extend lower 7 bits
 )
 const parseLocalInstruction = <TYPE extends string>(type: TYPE) =>

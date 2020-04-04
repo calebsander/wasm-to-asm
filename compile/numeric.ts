@@ -469,8 +469,7 @@ export function compileWrapInstruction(
 	const onStack = !value
 	if (onStack) [value] = INT_INTERMEDIATE_REGISTERS
 	const datum: asm.Datum = {type: 'register', register: value!, width: 'l'}
-	if (onStack) output.push(new asm.MoveInstruction(STACK_TOP, datum))
-	output.push(new asm.MoveInstruction(datum, datum))
+	output.push(new asm.MoveInstruction(onStack ? STACK_TOP : datum, datum))
 	if (onStack) output.push(new asm.MoveInstruction(datum, STACK_TOP))
 	context.push(false)
 }
