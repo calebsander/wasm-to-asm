@@ -31,7 +31,7 @@ export function compileLoadInstruction(
 	let index = context.resolvePop()
 	if (!index) {
 		index = INT_INTERMEDIATE_REGISTERS[0]
-		output.push(new asm.PopInstruction(index))
+		output.push(new asm.PopInstruction({type: 'register', register: index}))
 	}
 	const address: asm.Datum =
 		{type: 'register', register: INT_INTERMEDIATE_REGISTERS[1]}
@@ -46,30 +46,34 @@ export function compileLoadInstruction(
 	const isLoad32U = operation === 'load32_u'
 	let target = context.resolvePush(isFloat(resultType))
 	const push = !target
-	if (push) [target] = INT_INTERMEDIATE_REGISTERS // push requires an int register
-	const width = isLoad32U ? 'l' : memoryMoveWidth(resultType, push)
-	const targetDatum: asm.Datum = {type: 'register', register: target!, width}
-	if (operation === 'load' || isLoad32U) { // no resize needed
-		output.push(new asm.MoveInstruction(source, targetDatum, width))
-	}
+	if (push && type.endsWith('64.load')) output.push(new asm.PushInstruction(source))
 	else {
-		const [op, signedness] = operation.split('_')
-		let sourceWidth: asm.Width
-		switch (op) {
-			case 'load8':
-				sourceWidth = 'b'
-				break
-			case 'load16':
-				sourceWidth = 'w'
-				break
-			default: // 'load32'
-				sourceWidth = 'l'
+		if (push) [target] = INT_INTERMEDIATE_REGISTERS // push requires an int register
+		const width = isLoad32U ? 'l' : memoryMoveWidth(resultType, push)
+		const targetDatum: asm.Datum = {type: 'register', register: target!}
+		const targetWidth = {...targetDatum, width}
+		if (operation === 'load' || isLoad32U) { // no resize needed
+			output.push(new asm.MoveInstruction(source, targetWidth, width))
 		}
-		output.push(new asm.MoveExtendInstruction(
-			source, targetDatum, signedness === 's', {src: sourceWidth, dest: width}
-		))
+		else {
+			const [op, signedness] = operation.split('_')
+			let sourceWidth: asm.Width
+			switch (op) {
+				case 'load8':
+					sourceWidth = 'b'
+					break
+				case 'load16':
+					sourceWidth = 'w'
+					break
+				default: // 'load32'
+					sourceWidth = 'l'
+			}
+			output.push(new asm.MoveExtendInstruction(
+				source, targetWidth, signedness === 's', {src: sourceWidth, dest: width}
+			))
+		}
+		if (push) output.push(new asm.PushInstruction(targetDatum))
 	}
-	if (push) output.push(new asm.PushInstruction(target!))
 }
 export function compileStoreInstruction(
 	{type, access: {offset}}: LoadStoreInstruction,
@@ -81,12 +85,12 @@ export function compileStoreInstruction(
 	const pop = !value
 	if (pop) {
 		value = INT_INTERMEDIATE_REGISTERS[0] // pop requires an int register
-		output.push(new asm.PopInstruction(value))
+		output.push(new asm.PopInstruction({type: 'register', register: value}))
 	}
 	let index = context.resolvePop()
 	if (!index) {
 		index = INT_INTERMEDIATE_REGISTERS[1]
-		output.push(new asm.PopInstruction(index))
+		output.push(new asm.PopInstruction({type: 'register', register: index}))
 	}
 	const address: asm.Datum =
 		{type: 'register', register: INT_INTERMEDIATE_REGISTERS[2]}
@@ -118,14 +122,13 @@ export function compileSizeInstruction(
 	context: CompilationContext,
 	output: asm.AssemblyInstruction[]
 ): void {
-	let target = context.resolvePush(false)
-	const push = !target
-	if (push) [target] = INT_INTERMEDIATE_REGISTERS
-	output.push(new asm.MoveInstruction(
-		{type: 'label', label: context.moduleContext.memorySizeLabel},
-		{type: 'register', register: target!, width: 'l'}
-	))
-	if (push) output.push(new asm.PushInstruction(target!))
+	const target = context.resolvePush(false)
+	const sizeDatum: asm.Datum =
+		{type: 'label', label: context.moduleContext.memorySizeLabel}
+	output.push(target
+		? new asm.MoveInstruction(sizeDatum, {type: 'register', register: target})
+		: new asm.PushInstruction(sizeDatum)
+	)
 }
 export function compileGrowInstruction(
 	context: CompilationContext,
@@ -135,12 +138,10 @@ export function compileGrowInstruction(
 	if (!pages || MMAP_SYSCALL_REGISTERS.has(pages)) {
 		// %rax and %rdx are used for mmap() arguments
 		const newPages = INT_INTERMEDIATE_REGISTERS[1]
+		const newPagesDatum: asm.Datum = {type: 'register', register: newPages}
 		output.push(pages
-			? new asm.MoveInstruction(
-					{type: 'register', register: pages},
-					{type: 'register', register: newPages}
-				)
-			: new asm.PopInstruction(newPages)
+			? new asm.MoveInstruction({type: 'register', register: pages}, newPagesDatum)
+			: new asm.PopInstruction(newPagesDatum)
 		)
 		pages = newPages
 	}
@@ -163,13 +164,11 @@ export function compileGrowInstruction(
 		new asm.JumpInstruction(failLabel, 'a')
 	)
 	const registersUsed = new Set(context.registersUsed())
-	const toRestore = [pages]
+	const pushed: asm.Datum[] = [{type: 'register', register: pages}]
 	for (const register of MMAP_SYSCALL_REGISTERS) {
-		if (registersUsed.has(register)) toRestore.push(register)
+		if (registersUsed.has(register)) pushed.push({type: 'register', register})
 	}
-	for (const register of toRestore) {
-		output.push(new asm.PushInstruction(register))
-	}
+	for (const datum of pushed) output.push(new asm.PushInstruction(datum))
 	output.push(
 		new asm.MoveInstruction(
 			{type: 'immediate', value: SYSCALL.mmap}, SYSCALL_DATUM
@@ -189,26 +188,24 @@ export function compileGrowInstruction(
 		new asm.XorInstruction(MMAP_OFFSET_DATUM, MMAP_OFFSET_DATUM),
 		new asm.SysCallInstruction
 	)
-	for (const register of reverse(toRestore)) {
-		output.push(new asm.PopInstruction(register))
-	}
+	for (const datum of reverse(pushed)) output.push(new asm.PopInstruction(datum))
 	let result = context.resolvePush(false)
 	const push = !result
 	if (push) [result] = INT_INTERMEDIATE_REGISTERS
-	const datum: asm.Datum = {type: 'register', register: result!, width: 'l'}
+	const resultDatum: asm.Datum = {type: 'register', register: result!, width: 'l'}
 	output.push(
 		// mmap() < 0 indicates failure
 		new asm.TestInstruction(MMAP_RESULT_DATUM, MMAP_RESULT_DATUM),
 		new asm.JumpInstruction(failLabel, 'l'),
-		new asm.MoveInstruction(sizeLabel, datum),
+		new asm.MoveInstruction(sizeLabel, resultDatum),
 		new asm.AddInstruction(pagesDatum, sizeLabel),
 		new asm.JumpInstruction(endLabel),
 		new asm.Label(failLabel),
-		new asm.MoveInstruction({type: 'immediate', value: -1}, datum),
+		new asm.MoveInstruction({type: 'immediate', value: -1}, resultDatum),
 		new asm.JumpInstruction(endLabel),
 		new asm.Label(skipLabel),
-		new asm.MoveInstruction(sizeLabel, datum),
+		new asm.MoveInstruction(sizeLabel, resultDatum),
 		new asm.Label(endLabel)
 	)
-	if (push) output.push(new asm.PushInstruction(result!))
+	if (push) output.push(new asm.PushInstruction(resultDatum))
 }

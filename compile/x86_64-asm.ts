@@ -86,7 +86,14 @@ export interface AssemblyInstruction {
 	readonly str: string
 }
 
-abstract class SrcDestInstruction {
+abstract class UnaryInstruction implements AssemblyInstruction {
+	constructor(readonly datum: Datum) {}
+	abstract readonly op: string
+	get str() {
+		return `${this.op} ${datumToString(this.datum)}`
+	}
+}
+abstract class SrcDestInstruction implements AssemblyInstruction {
 	constructor(
 		readonly src: Datum,
 		readonly dest: Datum,
@@ -104,13 +111,7 @@ abstract class SrcDestInstruction {
 		}, ${datumToString(dest)}`
 	}
 }
-abstract class FullRegisterInstruction {
-	constructor(readonly register: Register) {}
-	get registerStr() {
-		return datumToString({type: 'register', register: this.register})
-	}
-}
-abstract class JumpLikeInstruction {
+abstract class JumpLikeInstruction implements AssemblyInstruction {
 	constructor(readonly target: string | Datum) {}
 	abstract readonly op: string
 	get str() {
@@ -121,7 +122,7 @@ abstract class JumpLikeInstruction {
 		return this.op + ' ' + targetString
 	}
 }
-export class Directive {
+export class Directive implements AssemblyInstruction {
 	constructor(readonly directive: GASDirective) {}
 	get str() {
 		let args: (string | number)[]
@@ -135,11 +136,11 @@ export class Directive {
 		return `.${this.directive.type}${args ? ' ' + args.join(' ') : ''}`
 	}
 }
-export class Label {
+export class Label implements AssemblyInstruction {
 	constructor(readonly label: string) {}
 	get str() { return this.label + ':' }
 }
-export class Comment {
+export class Comment implements AssemblyInstruction {
 	constructor(readonly comment: string) {}
 	get str() { return '# ' + this.comment }
 }
@@ -165,10 +166,10 @@ export class BsrInstruction extends SrcDestInstruction {
 export class CallInstruction extends JumpLikeInstruction {
 	get op() { return 'call' }
 }
-export class CdqoInstruction {
+export class CdqoInstruction implements AssemblyInstruction {
 	get str() { return 'cdq' }
 }
-export class CqtoInstruction {
+export class CqtoInstruction implements AssemblyInstruction {
 	get str() { return 'cqto' }
 }
 export class CMoveInstruction extends SrcDestInstruction {
@@ -203,15 +204,11 @@ export class CvtToIntInstruction extends SrcDestInstruction {
 	}
 	get op() { return `cvtts${this.srcWidth}2si` }
 }
-export class DivInstruction {
-	constructor(
-		readonly src: Datum,
-		readonly signed: boolean,
-		readonly width: Width
-	) {}
-	get str() {
-		return `${this.signed ? 'i' : ''}div${this.width} ${datumToString(this.src)}`
+export class DivInstruction extends UnaryInstruction {
+	constructor(src: Datum, readonly signed: boolean, readonly width: Width) {
+		super(src)
 	}
+	get op() { return `${this.signed ? 'i' : ''}div${this.width}` }
 }
 export class DivBinaryInstruction extends SrcDestInstruction {
 	get op() { return 'div' }
@@ -259,9 +256,8 @@ export class MoveExtendInstruction extends SrcDestInstruction {
 export class MulInstruction extends SrcDestInstruction {
 	get op() { return 'mul' }
 }
-export class NotInstruction {
-	constructor(readonly datum: Datum) {}
-	get str() { return 'not ' + datumToString(this.datum) }
+export class NotInstruction extends UnaryInstruction {
+	get op() { return 'not' }
 }
 export class OrInstruction extends SrcDestInstruction {
 	get op() { return 'or' }
@@ -269,28 +265,27 @@ export class OrInstruction extends SrcDestInstruction {
 export class OrPackedInstruction extends OrInstruction {
 	get packed() { return true }
 }
-export class PopInstruction extends FullRegisterInstruction {
+export class PopInstruction extends UnaryInstruction {
+	get op() { return 'pop' }
 	get str() {
-		if (isSIMDRegister(this.register)) {
-			return new MoveInstruction(
-				STACK_TOP, {type: 'register', register: this.register}, 'q'
-			).str + '\n' + shrinkStack(1).str
+		if (this.datum.type === 'register' && isSIMDRegister(this.datum.register)) {
+			return new MoveInstruction(STACK_TOP, this.datum, 'q').str + '\n' +
+				shrinkStack(1).str
 		}
-		else return 'pop ' + this.registerStr
+		return super.str
 	}
 }
 export class PopcntInstruction extends SrcDestInstruction {
 	get op() { return 'popcnt' }
 }
-// TODO: allow pushing a Datum, not just a register
-export class PushInstruction extends FullRegisterInstruction {
+export class PushInstruction extends UnaryInstruction {
+	get op() { return 'push' }
 	get str() {
-		if (isSIMDRegister(this.register)) {
-			return growStack(1).str + '\n' + new MoveInstruction(
-				{type: 'register', register: this.register}, STACK_TOP, 'q'
-			).str
+		if (this.datum.type === 'register' && isSIMDRegister(this.datum.register)) {
+			return growStack(1).str + '\n' +
+				new MoveInstruction(this.datum, STACK_TOP, 'q').str
 		}
-		else return 'push ' + this.registerStr
+		return super.str
 	}
 }
 export class RetInstruction {
@@ -312,9 +307,11 @@ export class RoundInstruction extends SrcDestInstruction {
 export class SarInstruction extends SrcDestInstruction {
 	get op() { return 'sar' }
 }
-export class SetInstruction {
-	constructor(readonly dest: Datum, readonly cond: JumpCond) {}
-	get str() { return `set${this.cond} ${datumToString(this.dest)}` }
+export class SetInstruction extends UnaryInstruction {
+	constructor(dest: Datum, readonly cond: JumpCond) {
+		super(dest)
+	}
+	get op() { return `set${this.cond}` }
 }
 export class ShlInstruction extends SrcDestInstruction {
 	get op() { return 'shl' }

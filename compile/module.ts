@@ -180,10 +180,10 @@ function compileGlobals(
 			addExportLabel(exportLabel, output)
 			declarations.push(new GlobalDeclaration('int', true, exportLabel))
 		}
-		// 4-byte align not necessary
+		// 8-byte align not necessary
 		output.push(
 			new asm.Label(memorySizeLabel),
-			new asm.Directive({type: 'long', args: [0]})
+			new asm.Directive({type: 'quad', args: [0]})
 		)
 	}
 
@@ -321,11 +321,12 @@ function compileInitInstructions(
 	if (startFunction !== undefined) compile({type: 'call', func: startFunction})
 
 	const registersUsed = new Set(globalContext.registersUsed(true))
-	const toRestore: asm.Register[] = []
+	const toRestore: asm.Datum[] = []
 	for (const register of SYSV_CALLEE_SAVE_REGISTERS) {
 		if (registersUsed.has(register)) {
-			output.push(new asm.PushInstruction(register))
-			toRestore.push(register)
+			const datum: asm.Datum = {type: 'register', register}
+			output.push(new asm.PushInstruction(datum))
+			toRestore.push(datum)
 		}
 	}
 	output.push(...initOutput)
@@ -363,32 +364,28 @@ export function compileFunctionBodies(
 			compileInstructions(instructions, functionContext, bodyOutput).definitely
 		if (!branches) popResultAndUnwind(functionContext, bodyOutput)
 
-		const registersUsed = functionContext.registersUsed(true)
-		for (const register of registersUsed) {
-			functionOutput.push(new asm.PushInstruction(register))
+		const pushed: asm.Datum[] = []
+		for (const register of functionContext.registersUsed(true)) {
+			const datum: asm.Datum = {type: 'register', register}
+			functionOutput.push(new asm.PushInstruction(datum))
+			pushed.push(datum)
 		}
-		const pushedRegisters = registersUsed.length
 		const {stackParams, stackLocals} = functionContext
-		const copyDatum: asm.Datum =
-			{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+		const pushParam = new asm.PushInstruction(
+			// Account for pushed registers and return value
+			new SPRelative(pushed.length + stackParams).datum
+		)
 		for (let i = 0; i < stackParams; i++) {
 			// TODO: if the caller knew pushedRegisters,
 			// they could put the stack params in the right locations
-			functionOutput.push(
-				new asm.MoveInstruction(
-					new SPRelative(pushedRegisters + 1 + i).datum, // account for return address
-					copyDatum
-				),
-				new asm.MoveInstruction(
-					copyDatum, new SPRelative(-(stackParams - i)).datum
-				)
-			)
+			functionOutput.push(pushParam)
 		}
-		if (stackLocals) functionOutput.push(growStack(stackLocals))
+		const reservedLocals = stackLocals - stackParams
+		if (reservedLocals) functionOutput.push(growStack(reservedLocals))
 		functionContext.locals.forEach(({float}, i) => {
 			const datum = functionContext.resolveLocalDatum(i)
 			const zeroDatum: asm.Datum = float && datum.type === 'register'
-				? copyDatum
+				? {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
 				: datum
 			functionOutput.push(new asm.MoveInstruction(
 				{type: 'immediate', value: 0}, zeroDatum, 'q'
@@ -402,8 +399,8 @@ export function compileFunctionBodies(
 
 		functionOutput.push(new asm.Label(context.returnLabel(functionIndex)))
 		if (stackLocals) functionOutput.push(shrinkStack(stackLocals))
-		for (const register of reverse(registersUsed)) {
-			functionOutput.push(new asm.PopInstruction(register))
+		for (const datum of reverse(pushed)) {
+			functionOutput.push(new asm.PopInstruction(datum))
 		}
 		functionOutput.push(new asm.RetInstruction)
 
@@ -429,8 +426,11 @@ export function compileFunctionBodies(
 			})
 			const {toRestore, output: relocateOutput} =
 				relocateArguments(moves, stackParams, SYSV_CALLEE_SAVE_SET, 1)
+			const pushed: asm.Datum[] = []
 			for (const register of toRestore) {
-				output.push(new asm.PushInstruction(register))
+				const datum: asm.Datum = {type: 'register', register}
+				output.push(new asm.PushInstruction(datum))
+				pushed.push(datum)
 			}
 			output.push(...relocateOutput)
 			if (toRestore.length || calleeStackParams) {
@@ -441,9 +441,7 @@ export function compileFunctionBodies(
 				if (calleeStackParams) { // pop parameters passed on the stack
 					output.push(shrinkStack(calleeStackParams))
 				}
-				for (const register of reverse(toRestore)) {
-					output.push(new asm.PopInstruction(register))
-				}
+				for (const datum of reverse(pushed)) output.push(new asm.PopInstruction(datum))
 				output.push(new asm.RetInstruction)
 			}
 		}

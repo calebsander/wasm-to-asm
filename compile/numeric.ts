@@ -76,22 +76,33 @@ export function compileConstInstruction(
 	const float = isFloat(constType)
 	const wide = constType.endsWith('64')
 	if (float) value = convertFloatToInt(value as number, wide)
+	const immediate: asm.Datum = {type: 'immediate', value}
+	const width = wide ? 'q' : 'l'
 	const target = context.resolvePush(float)
-	const intermediate = !target || float
-		? INT_INTERMEDIATE_REGISTERS[0]
-		: target
-	const intermediateDatum: asm.Datum = {type: 'register', register: intermediate}
-	output.push(new asm.MoveInstruction(
-		{type: 'immediate', value}, {...intermediateDatum, width: wide ? 'q' : 'l'}
-	))
 	if (target) {
+		const targetDatum: asm.Datum =
+			{type: 'register', register: float ? INT_INTERMEDIATE_REGISTERS[0] : target}
+		output.push(new asm.MoveInstruction(immediate, {...targetDatum, width}))
 		if (float) {
 			output.push(new asm.MoveInstruction(
-				intermediateDatum, {type: 'register', register: target}, 'q'
+				targetDatum, {type: 'register', register: target}, 'q'
 			))
 		}
 	}
-	else output.push(new asm.PushInstruction(intermediate))
+	else {
+		const valueNumber = Number(value)
+		if (valueNumber === (valueNumber | 0) && (wide || valueNumber >= 0)) {
+			output.push(new asm.PushInstruction(immediate))
+		}
+		else {
+			const intermediateDatum: asm.Datum =
+				{type: 'register', register: INT_INTERMEDIATE_REGISTERS[0]}
+			output.push(
+				new asm.MoveInstruction(immediate, {...intermediateDatum, width}),
+				new asm.PushInstruction(intermediateDatum)
+			)
+		}
+	}
 }
 export function compileCompareInstruction(
 	instruction:
@@ -113,7 +124,7 @@ export function compileCompareInstruction(
 		let arg2 = context.resolvePop()
 		if (!arg2) {
 			[arg2] = getIntermediateRegisters(float)
-			output.push(new asm.PopInstruction(arg2))
+			output.push(new asm.PopInstruction({type: 'register', register: arg2}))
 		}
 		datum2 = {type: 'register', register: arg2, width}
 	}
@@ -126,9 +137,8 @@ export function compileCompareInstruction(
 	if (push) resultRegister = INT_INTERMEDIATE_REGISTERS[0]
 	const cond = COMPARE_OPERATIONS.get(operation)
 	if (!cond) throw new Error('No comparison value found for ' + instruction)
-	const result8: asm.Datum =
-		{type: 'register', register: resultRegister!, width: 'b'}
-	const result32: asm.Datum = {...result8, width: 'l'}
+	const result: asm.Datum = {type: 'register', register: resultRegister!}
+	const result8: asm.Datum = {...result, width: 'b'}
 	output.push(
 		new asm.CmpInstruction(datum2, datum1, width),
 		new asm.SetInstruction(result8, cond)
@@ -150,8 +160,8 @@ export function compileCompareInstruction(
 			new parityInstruction(parityDatum, result8)
 		)
 	}
-	output.push(new asm.MoveExtendInstruction(result8, result32, false))
-	if (push) output.push(new asm.MoveInstruction(result32, STACK_TOP))
+	output.push(new asm.MoveExtendInstruction(result8, {...result8, width: 'l'}, false))
+	if (push) output.push(new asm.MoveInstruction(result, STACK_TOP))
 }
 export function compileBitCountInstruction(
 	instruction:
@@ -173,7 +183,7 @@ export function compileBitCountInstruction(
 		: {type: 'register', register: INT_INTERMEDIATE_REGISTERS[0], width}
 	output.push(new asmInstruction(datum, result))
 	if (operation !== 'popcnt') {
-		// BSF and BSR are undefined on inputs that are 0
+		// bsf and bsr are undefined on inputs that are 0
 		const widthBits = Number(type.slice(1))
 		const clz = operation === 'clz'
 		const widthDatum: asm.Datum =
@@ -185,7 +195,7 @@ export function compileBitCountInstruction(
 			new asm.CMoveInstruction(widthDatum, result, 'e')
 		)
 		if (clz) {
-			// BSR's output needs to be flipped
+			// bsr output needs to be flipped
 			output.push(
 				new asm.XorInstruction({type: 'immediate', value: widthBits - 1}, result)
 			)
@@ -206,7 +216,7 @@ export function compileIntArithmeticInstruction(
 	if (!operand2) {
 		// Using intermediate register 1 instead of 0 to avoid extra mov for shifts
 		operand2 = INT_INTERMEDIATE_REGISTERS[1]
-		output.push(new asm.PopInstruction(operand2))
+		output.push(new asm.PopInstruction({type: 'register', register: operand2}))
 	}
 	const operand1 = context.resolvePop()
 	const [type, operation] = instruction.split('.') as [ValueType, string]
@@ -241,7 +251,7 @@ export function compileIntMulInstruction(
 	let operand2 = context.resolvePop()
 	if (!operand2) {
 		[operand2] = INT_INTERMEDIATE_REGISTERS
-		output.push(new asm.PopInstruction(operand2))
+		output.push(new asm.PopInstruction({type: 'register', register: operand2}))
 	}
 	const datum2: asm.Datum = {type: 'register', register: operand2, width}
 	const operand1 = context.resolvePop()
@@ -333,7 +343,7 @@ export function compileSignInstruction(
 		let signOperand = context.resolvePop()
 		if (!signOperand) {
 			signOperand = FLOAT_INTERMEDIATE_REGISTERS[1]
-			output.push(new asm.PopInstruction(signOperand))
+			output.push(new asm.PopInstruction({type: 'register', register: signOperand}))
 		}
 		signDatum = {type: 'register', register: FLOAT_INTERMEDIATE_REGISTERS[2]}
 		output.push(
@@ -661,14 +671,15 @@ export function compileReinterpretInstruction(
 	const float = isFloat(type)
 	const result = context.resolvePush(float)
 	if (operand) {
+		const datum: asm.Datum = {type: 'register', register: operand}
 		output.push(result
 			? new asm.MoveInstruction(
-					{type: 'register', register: operand},
-					{type: 'register', register: result},
-					'q'
+					datum, {type: 'register', register: result}, 'q'
 				)
-			: new asm.PushInstruction(operand)
+			: new asm.PushInstruction(datum)
 		)
 	}
-	else if (result) output.push(new asm.PopInstruction(result))
+	else if (result) {
+		output.push(new asm.PopInstruction({type: 'register', register: result}))
+	}
 }

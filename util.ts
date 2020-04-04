@@ -8,5 +8,5 @@ export function convertFloatToInt(value: number, wide: boolean): number | bigint
 	const dataView = new DataView(new ArrayBuffer(wide ? 8 : 4))
 	if (wide) dataView.setFloat64(0, value, true)
 	else dataView.setFloat32(0, value, true)
-	return wide ? dataView.getBigUint64(0, true) : dataView.getUint32(0, true)
+	return wide ? dataView.getBigInt64(0, true) : dataView.getInt32(0, true)
 }

@@ -93,7 +93,7 @@ export function compileIfInstruction(
 	let cond = context.resolvePop()
 	if (!cond) { // cond is on the stack
 		[cond] = INT_INTERMEDIATE_REGISTERS
-		output.push(new asm.PopInstruction(cond))
+		output.push(new asm.PopInstruction({type: 'register', register: cond}))
 	}
 	const {stackState} = context
 	const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
@@ -132,7 +132,7 @@ export function compileBranchInstruction(
 		let cond = context.resolvePop()
 		if (!cond) {
 			[cond] = INT_INTERMEDIATE_REGISTERS
-			output.push(new asm.PopInstruction(cond))
+			output.push(new asm.PopInstruction({type: 'register', register: cond}))
 		}
 		({stackState} = context)
 		const datum: asm.Datum = {type: 'register', register: cond, width: 'l'}
@@ -158,7 +158,7 @@ export function compileBranchTableInstruction(
 	let value = context.resolvePop()
 	if (!value) {
 		value = INT_INTERMEDIATE_REGISTERS[0]
-		output.push(new asm.PopInstruction(value))
+		output.push(new asm.PopInstruction({type: 'register', register: value}))
 	}
 
 	const tableLabel = context.makeLabel('BR_TABLE')
@@ -232,12 +232,10 @@ export function compileCallInstruction(
 		// Skip %rax since it may be clobbered by relocation
 		indexRegister = INT_INTERMEDIATE_REGISTERS[1]
 		const value = context.resolvePop()
+		const indexDatum: asm.Datum = {type: 'register', register: indexRegister}
 		output.push(value
-			? new asm.MoveInstruction(
-					{type: 'register', register: value},
-					{type: 'register', register: indexRegister}
-				)
-			: new asm.PopInstruction(indexRegister)
+			? new asm.MoveInstruction({type: 'register', register: value}, indexDatum)
+			: new asm.PopInstruction(indexDatum)
 		)
 	}
 	const {params, result, stackLocals} = otherContext
@@ -257,7 +255,12 @@ export function compileCallInstruction(
 	}
 	const {toRestore, output: relocateOutput} =
 		relocateArguments(moves, stackParams, registersUsed)
-	for (const register of toRestore) output.push(new asm.PushInstruction(register))
+	const pushed: asm.Datum[] = []
+	for (const register of toRestore) {
+		const datum: asm.Datum = {type: 'register', register}
+		output.push(new asm.PushInstruction(datum))
+		pushed.push(datum)
+	}
 	output.push(...relocateOutput)
 	if (calleeStackParams) { // point to end of pushed parameters
 		output.push(growStack(calleeStackParams))
@@ -284,24 +287,21 @@ export function compileCallInstruction(
 	if (calleeStackParams) { // pop parameters passed on the stack
 		output.push(shrinkStack(calleeStackParams))
 	}
-	for (const register of reverse(toRestore)) {
-		output.push(new asm.PopInstruction(register))
-	}
+	for (const datum of reverse(pushed)) output.push(new asm.PopInstruction(datum))
 	const stackPopped = stackParams.length
 	if (stackPopped) { // point to actual stack location
 		output.push(shrinkStack(stackPopped))
 	}
 	if (result) {
 		const float = isFloat(result)
-		const resultRegister = getResultRegister(float)
+		const resultDatum: asm.Datum =
+			{type: 'register', register: getResultRegister(float)}
 		const pushTo = context.resolvePush(float)
 		output.push(pushTo
 			? new asm.MoveInstruction(
-					{type: 'register', register: resultRegister},
-					{type: 'register', register: pushTo},
-					'q'
+					resultDatum, {type: 'register', register: pushTo}, 'q'
 				)
-			: new asm.PushInstruction(resultRegister)
+			: new asm.PushInstruction(resultDatum)
 		)
 	}
 }

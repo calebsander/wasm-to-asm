@@ -141,13 +141,10 @@ export function compileBranch(
 		) {
 			// Result is going to be moved
 			[resultRegister] = getIntermediateRegisters(float)
+			const resultDatum: asm.Datum = {type: 'register', register: resultRegister}
 			output.push(toPop
-				? new asm.MoveInstruction(
-						{type: 'register', register: toPop},
-						{type: 'register', register: resultRegister},
-						'q'
-					)
-				: new asm.PopInstruction(resultRegister)
+				? new asm.MoveInstruction({type: 'register', register: toPop}, resultDatum, 'q')
+				: new asm.PopInstruction(resultDatum)
 			)
 		}
 	}
@@ -155,13 +152,10 @@ export function compileBranch(
 	if (saveResult) {
 		const target = context.resolvePush(float!)
 		if (resultRegister) {
+			const resultDatum: asm.Datum = {type: 'register', register: resultRegister}
 			output.push(target
-				? new asm.MoveInstruction(
-						{type: 'register', register: resultRegister},
-						{type: 'register', register: target},
-						'q'
-					)
-				: new asm.PushInstruction(resultRegister)
+				? new asm.MoveInstruction(resultDatum, {type: 'register', register: target}, 'q')
+				: new asm.PushInstruction(resultDatum)
 			)
 		}
 	}
@@ -175,14 +169,11 @@ export function popResultAndUnwind(
 	const {result} = context
 	if (result) {
 		const register = context.resolvePop()
-		const resultRegister = getResultRegister(isFloat(result))
+		const resultDatum: asm.Datum =
+			{type: 'register', register: getResultRegister(isFloat(result))}
 		output.push(register
-			? new asm.MoveInstruction(
-					{type: 'register', register},
-					{type: 'register', register: resultRegister},
-					'q'
-				)
-			: new asm.PopInstruction(resultRegister)
+			? new asm.MoveInstruction({type: 'register', register}, resultDatum, 'q')
+			: new asm.PopInstruction(resultDatum)
 		)
 	}
 	unwindStack(0, 0, context, output)

@@ -16,7 +16,7 @@ export function compileSelectInstruction(
 	let cond = context.resolvePop()
 	if (!cond) {
 		cond = INT_INTERMEDIATE_REGISTERS[0]
-		output.push(new asm.PopInstruction(cond))
+		output.push(new asm.PopInstruction({type: 'register', register: cond}))
 	}
 	const condDatum: asm.Datum = {type: 'register', register: cond, width: 'l'}
 	const float = context.peek()
