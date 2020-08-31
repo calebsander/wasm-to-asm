@@ -209,14 +209,13 @@ const parseMemoryInitializer = parseAndThen(parseUnsigned, memoryIndex =>
 const sectionParsers = new Map([
 	[0, parseAndThen(parseUnsigned, length =>
 		data => parseAndThen(parseName, name =>
-			({buffer, byteOffset}): ParseResult<Section> => ({
-				value: {
-					type: 'custom',
-					name,
-					contents: buffer.slice(byteOffset, data.byteOffset + length)
-				},
-				length
-			})
+			({buffer, byteOffset}): ParseResult<Section> => {
+				const contents = buffer.slice(byteOffset, data.byteOffset + length)
+				return {
+					value: {type: 'custom', name, contents},
+					length: contents.byteLength
+				}
+			}
 		)(data)
 	)]
 ])
@@ -272,7 +271,6 @@ export const parseModule = parseIgnore(parseMagic,
 	parseIgnore(
 		parseMap(parseVersion, version => {
 			if (version !== VERSION) throw new Error(`Unsupported version ${version}`)
-			return
 		}),
 		parseUntil(parseSection, parseEnd)
 	)
